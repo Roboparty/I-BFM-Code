@@ -1,0 +1,135 @@
+{
+    "name": "FBcprAuxModel",
+    "device": "cuda",
+    "archi": {
+        "name": "FBcprAuxModelArchiConfig",
+        "z_dim": 256,
+        "norm_z": true,
+        "f": {
+            "name": "ForwardArchi",
+            "hidden_dim": 2048,
+            "model": "residual",
+            "hidden_layers": 6,
+            "embedding_layers": 2,
+            "num_parallel": 2,
+            "ensemble_mode": "batch",
+            "input_filter": {
+                "name": "DictInputFilterConfig",
+                "key": [
+                    "state",
+                    "privileged_state",
+                    "last_action",
+                    "history_actor"
+                ]
+            }
+        },
+        "b": {
+            "name": "BackwardArchi",
+            "hidden_dim": 256,
+            "hidden_layers": 1,
+            "norm": true,
+            "input_filter": {
+                "name": "DictInputFilterConfig",
+                "key": [
+                    "state",
+                    "privileged_state"
+                ]
+            }
+        },
+        "actor": {
+            "name": "actor",
+            "model": "residual",
+            "hidden_dim": 2048,
+            "hidden_layers": 6,
+            "embedding_layers": 2,
+            "input_filter": {
+                "name": "DictInputFilterConfig",
+                "key": [
+                    "state",
+                    "last_action",
+                    "history_actor"
+                ]
+            }
+        },
+        "critic": {
+            "name": "ForwardArchi",
+            "hidden_dim": 2048,
+            "model": "residual",
+            "hidden_layers": 6,
+            "embedding_layers": 2,
+            "num_parallel": 2,
+            "ensemble_mode": "batch",
+            "input_filter": {
+                "name": "DictInputFilterConfig",
+                "key": [
+                    "state",
+                    "privileged_state",
+                    "last_action",
+                    "history_actor"
+                ]
+            }
+        },
+        "discriminator": {
+            "name": "DiscriminatorArchi",
+            "hidden_dim": 1024,
+            "hidden_layers": 3,
+            "input_filter": {
+                "name": "DictInputFilterConfig",
+                "key": [
+                    "state",
+                    "privileged_state"
+                ]
+            }
+        },
+        "aux_critic": {
+            "name": "ForwardArchi",
+            "hidden_dim": 2048,
+            "model": "residual",
+            "hidden_layers": 6,
+            "embedding_layers": 2,
+            "num_parallel": 2,
+            "ensemble_mode": "batch",
+            "input_filter": {
+                "name": "DictInputFilterConfig",
+                "key": [
+                    "state",
+                    "privileged_state",
+                    "last_action",
+                    "history_actor"
+                ]
+            }
+        }
+    },
+    "obs_normalizer": {
+        "name": "ObsNormalizerConfig",
+        "normalizers": {
+            "state": {
+                "name": "BatchNormNormalizerConfig",
+                "momentum": 0.01
+            },
+            "privileged_state": {
+                "name": "BatchNormNormalizerConfig",
+                "momentum": 0.01
+            },
+            "last_action": {
+                "name": "BatchNormNormalizerConfig",
+                "momentum": 0.01
+            },
+            "history_actor": {
+                "name": "BatchNormNormalizerConfig",
+                "momentum": 0.01
+            }
+        },
+        "allow_mismatching_keys": true
+    },
+    "inference_batch_size": 500000,
+    "seq_length": 8,
+    "actor_std": 0.05,
+    "amp": false,
+    "sphere_log_mode": "actor",
+    "norm_aux_reward": {
+        "name": "RewardNormalizer",
+        "translate": false,
+        "scale": true
+    }
+}

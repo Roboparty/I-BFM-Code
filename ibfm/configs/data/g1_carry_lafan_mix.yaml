@@ -1,0 +1,16 @@
+robot_config: configs/robots/g1_29dof.yaml
+
+datasets:
+  # Direct joint training keeps object observations statistically active while
+  # prioritizing general LAFAN motion coverage. Weights are enforced independently
+  # of the number of clips in each source (LAFAN:Carry = 8:2).
+  - name: g1_carry_box
+    format: ufo_pkl
+    # Build this cache once with configs/data/g1_carry_box.yaml.
+    train_path: ../../cache/motion_data/g1_carry_box/g1_carry_box_train_near10s_ufo.pkl
+    weight: 0.2
+
+  - name: g1_lafan
+    format: ufo_pkl
+    train_path: ../../humanoidverse/data/lafan_29dof_10s-clipped.pkl
+    weight: 0.8

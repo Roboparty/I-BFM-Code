@@ -1,0 +1,14 @@
+robot_config: configs/robots/g1_29dof.yaml
+
+datasets:
+  # This directory is the basename set difference between the 1808-motion
+  # object-interaction collection and the corrected 1321-motion no-foot set.
+  - name: g1_kick_box_omniretarget
+    format: omniretarget_carry_npz
+    source_path: ../../data/g1_kick_box_omniretarget_mujoco_contact/*.npz
+    weight: 1.0
+    auto_build:
+      train_clip_seconds: 10.0
+      clip_stride_seconds: 10.0
+      keep_short: true
+      min_clip_seconds: 1.0

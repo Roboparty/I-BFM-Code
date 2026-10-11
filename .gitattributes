@@ -1,0 +1,4 @@
+checkpoints/ibfm-166m/model/model.safetensors.part-* filter=lfs diff=lfs merge=lfs -text
+ibfm/humanoidverse/data/lafan_29dof*.pkl filter=lfs diff=lfs merge=lfs -text
+ibfm/cache/motion_data/g1_carry_box_omniretarget_no_foot/*.pkl filter=lfs diff=lfs merge=lfs -text
+ibfm/cache/motion_data/g1_kick_box_omniretarget/*.pkl filter=lfs diff=lfs merge=lfs -text

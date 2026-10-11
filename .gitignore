@@ -1,0 +1,14 @@
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.venv
+**/runs/
+**/interactive/
+**/rollouts/
+**/interactive_rollouts/
+**/local_cpu_rollouts/
+/ibfm/cache/
+/ibfm/tasks/carry_box/random_height_scene/
+/ibfm/humanoidverse/data/*.pkl
+/checkpoints/ibfm-166m/model/model.safetensors
+*.tmp

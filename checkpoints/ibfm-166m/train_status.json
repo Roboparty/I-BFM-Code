@@ -1,0 +1,9 @@
+{
+    "time": 166559744,
+    "local_time": 20819968,
+    "global_time": 166559744,
+    "optimizer_steps": 325136,
+    "world_size": 8,
+    "loss_mode": "local_loss_average",
+    "effective_batch_size": 8192
+}

@@ -1,0 +1,46 @@
+half_size: [0.1675266, 0.1688563, 0.1800429]
+# HHTools object tracks use a marker frame; this transform locates the fitted
+# box geometry in that frame.
+geom_pos: [0.00102584, -0.00160677, 0.00637628]
+geom_quat_wxyz: [0.07016202, 0.97153219, 0.22227911, 0.04236142]
+mass: 1.25
+friction: [0.9, 0.01, 0.001]
+ground_surface_height: 0.0
+phase_lift_clearance: 0.005
+
+observe_target_delta: true
+observe_object_present: true
+observe_task_id: true
+
+# Midpoints and exact capsule geometry from the RP1 3.2 wrist-pitch collision
+# geoms in humanoidverse/data/robots/rp1_3_2/mjcf/robot.xml.
+hand_contact_offsets:
+  - [0.021, -0.02336, 0.0]
+  - [0.021, 0.02336, 0.0]
+hand_capsule_segments:
+  - [[0.0, -0.023, 0.0], [0.042, -0.02372, 0.0]]
+  - [[0.0, 0.023, 0.0], [0.042, 0.02372, 0.0]]
+hand_contact_radius: 0.031
+observe_hand_spatial: true
+
+mass_scale_range: [0.8, 1.2]
+friction_range: [0.6, 1.2]
+initial_position_noise: 0.02
+initial_velocity_noise: 0.05
+target_position_noise: 0.15
+disturbance_velocity: 0.0
+disturbance_interval_s: [3.0, 6.0]
+random_motion_start_probability: 0.5
+absent_position: [100.0, 100.0, 0.185]
+ground_center_height: 0.185
+reach_scale: 0.35
+lift_height: 0.35
+lifted_threshold: 0.18
+position_std: 0.20
+success_position_tolerance: 0.15
+success_speed_tolerance: 0.15
+success_upright: 0.90
+success_robot_upright: 0.85
+success_hold_steps: 25
+fall_root_height: 0.25
+fall_gravity_z: -0.25

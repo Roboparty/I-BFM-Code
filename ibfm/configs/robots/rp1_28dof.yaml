@@ -1,0 +1,183 @@
+name: rp1_28dof
+xml_path: humanoidverse/data/robots/rp1_3_2/mjcf/robot.xml
+
+base_body: base_link
+root_quat_order: xyzw
+coordinate_system: z_up
+dof_unit: rad
+
+control_joints:
+  mode: all_actuated
+
+feet:
+  - left_ankle_roll_link
+  - right_ankle_roll_link
+
+hands:
+  - left_wrist_pitch_link
+  - right_wrist_pitch_link
+
+key_bodies:
+  - base_link
+  - waist_yaw_link
+  - left_ankle_roll_link
+  - right_ankle_roll_link
+  - left_wrist_pitch_link
+  - right_wrist_pitch_link
+
+default_dof_pos: {}
+
+training:
+  hydra_robot: g1/g1_29dof_hard_waist
+  hydra_overrides:
+    - env.config.lie_down_init=True
+    - env.config.lie_down_init_prob=0.3
+  semantics:
+    contact_bodies:
+      - left_ankle_roll_link
+      - right_ankle_roll_link
+    undesired_contact_bodies:
+      - base_link
+      - shoulder
+      - hip
+    torso_name: waist_yaw_link
+    left_ankle_dof_names:
+      - left_ankle_pitch_joint
+      - left_ankle_roll_joint
+    right_ankle_dof_names:
+      - right_ankle_pitch_joint
+      - right_ankle_roll_joint
+  init_state:
+    pos: [0.0, 0.0, 0.78]
+    rot: [0.0, 0.0, 0.0, 1.0]
+    lin_vel: [0.0, 0.0, 0.0]
+    ang_vel: [0.0, 0.0, 0.0]
+    default_joint_angles:
+      left_hip_pitch_joint: 0.0
+      left_hip_roll_joint: 0.0
+      left_hip_yaw_joint: 0.0
+      left_knee_joint: 0.0
+      left_ankle_pitch_joint: 0.0
+      left_ankle_roll_joint: 0.0
+      right_hip_pitch_joint: 0.0
+      right_hip_roll_joint: 0.0
+      right_hip_yaw_joint: 0.0
+      right_knee_joint: 0.0
+      right_ankle_pitch_joint: 0.0
+      right_ankle_roll_joint: 0.0
+      waist_roll_joint: 0.0
+      waist_yaw_joint: 0.0
+      left_shoulder_pitch_joint: 0.0
+      left_shoulder_roll_joint: 0.0
+      left_shoulder_yaw_joint: 0.0
+      left_elbow_joint: 0.0
+      left_wrist_roll_joint: 0.0
+      left_wrist_yaw_joint: 0.0
+      left_wrist_pitch_joint: 0.0
+      right_shoulder_pitch_joint: 0.0
+      right_shoulder_roll_joint: 0.0
+      right_shoulder_yaw_joint: 0.0
+      right_elbow_joint: 0.0
+      right_wrist_roll_joint: 0.0
+      right_wrist_yaw_joint: 0.0
+      right_wrist_pitch_joint: 0.0
+  control:
+    action_scale: 0.25
+    # Start from G1-equivalent PD ranges, then widen the RP1-limited joints to
+    # cover the 0.5--99.5 percentile range of both LAFAN and Carry references.
+    action_scale_overrides:
+      left_hip_pitch_joint: 0.3974186
+      left_hip_roll_joint: 0.2969610
+      left_hip_yaw_joint: 0.3477712
+      left_knee_joint: 0.5842286
+      left_ankle_pitch_joint: 0.2484857
+      left_ankle_roll_joint: 0.2484857
+      right_hip_pitch_joint: 0.3974186
+      right_hip_roll_joint: 0.2969610
+      right_hip_yaw_joint: 0.3477712
+      right_knee_joint: 0.5842286
+      right_ankle_pitch_joint: 0.2484857
+      right_ankle_roll_joint: 0.2484857
+      waist_roll_joint: 0.2272855
+      waist_yaw_joint: 0.1897062
+      left_shoulder_pitch_joint: 0.4969716
+      left_shoulder_roll_joint: 0.4969716
+      left_shoulder_yaw_joint: 0.2484858
+      left_elbow_joint: 0.3727287
+      left_wrist_roll_joint: 0.2484858
+      left_wrist_yaw_joint: 0.2204170
+      left_wrist_pitch_joint: 0.2204170
+      right_shoulder_pitch_joint: 0.4969716
+      right_shoulder_roll_joint: 0.4969716
+      right_shoulder_yaw_joint: 0.2484858
+      right_elbow_joint: 0.3727287
+      right_wrist_roll_joint: 0.2484858
+      right_wrist_yaw_joint: 0.2204170
+      right_wrist_pitch_joint: 0.2204170
+    action_clip_value: 5.0
+    normalize_action_to: 5.0
+    effort_limit_scale: 1.0
+    effort_limit: [141.7, 141.7, 141.7, 141.7, 70.6, 70.6, 141.7, 141.7, 141.7, 141.7, 70.6, 70.6, 141.7, 141.7, 35.3, 35.3, 35.3, 35.3, 35.3, 35.3, 35.3, 35.3, 35.3, 35.3, 35.3, 35.3, 35.3, 35.3]
+    velocity_limit: [14.24192, 14.24192, 14.24192, 14.24192, 21.88648, 21.88648, 14.24192, 14.24192, 14.24192, 14.24192, 21.88648, 21.88648, 14.24192, 14.24192, 21.88648, 21.88648, 21.88648, 21.88648, 21.88648, 21.88648, 21.88648, 21.88648, 21.88648, 21.88648, 21.88648, 21.88648, 21.88648, 21.88648]
+    stiffness:
+      waist_roll: 300.0
+      waist_yaw: 250.0
+      hip_pitch: 120.0
+      hip_roll: 120.0
+      hip_yaw: 90.0
+      knee: 150.0
+      ankle_pitch: 40.0
+      ankle_roll: 40.0
+      shoulder_pitch: 40.0
+      shoulder_roll: 40.0
+      shoulder_yaw: 20.0
+      elbow: 30.0
+      wrist: 20.0
+    damping:
+      waist_roll: 25.0
+      waist_yaw: 20.0
+      hip_pitch: 8.0
+      hip_roll: 8.0
+      hip_yaw: 6.0
+      knee: 10.0
+      ankle_pitch: 2.0
+      ankle_roll: 2.0
+      shoulder_pitch: 3.0
+      shoulder_roll: 3.0
+      shoulder_yaw: 1.0
+      elbow: 1.5
+      wrist: 1.0
+  actuator:
+    source: yaml
+    joints:
+      left_hip_pitch_joint: &leg_motor
+        {effort_limit: 141.7, velocity_limit: 14.24192, armature: 0.029085325, friction: 0.01}
+      left_hip_roll_joint: *leg_motor
+      left_hip_yaw_joint: *leg_motor
+      left_knee_joint: *leg_motor
+      left_ankle_pitch_joint: &ankle_motor
+        {effort_limit: 70.6, velocity_limit: 21.88648, armature: 0.01, friction: 0.05}
+      left_ankle_roll_joint: *ankle_motor
+      right_hip_pitch_joint: *leg_motor
+      right_hip_roll_joint: *leg_motor
+      right_hip_yaw_joint: *leg_motor
+      right_knee_joint: *leg_motor
+      right_ankle_pitch_joint: *ankle_motor
+      right_ankle_roll_joint: *ankle_motor
+      waist_roll_joint: *leg_motor
+      waist_yaw_joint: *leg_motor
+      left_shoulder_pitch_joint: &arm_motor
+        {effort_limit: 35.3, velocity_limit: 21.88648, armature: 0.01, friction: 0.01}
+      left_shoulder_roll_joint: *arm_motor
+      left_shoulder_yaw_joint: *arm_motor
+      left_elbow_joint: *arm_motor
+      left_wrist_roll_joint: *arm_motor
+      left_wrist_yaw_joint: *arm_motor
+      left_wrist_pitch_joint: *arm_motor
+      right_shoulder_pitch_joint: *arm_motor
+      right_shoulder_roll_joint: *arm_motor
+      right_shoulder_yaw_joint: *arm_motor
+      right_elbow_joint: *arm_motor
+      right_wrist_roll_joint: *arm_motor
+      right_wrist_yaw_joint: *arm_motor
+      right_wrist_pitch_joint: *arm_motor

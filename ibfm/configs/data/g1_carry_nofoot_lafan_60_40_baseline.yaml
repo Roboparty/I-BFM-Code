@@ -1,0 +1,15 @@
+robot_config: configs/robots/g1_29dof.yaml
+
+datasets:
+  # Reproduce the 73.67M hand-spatial baseline while changing only the source
+  # sampling ratio from Carry:LAFAN = 50:50 to 60:40. Approach motions are
+  # intentionally excluded so object_present/task_id retain the baseline meaning.
+  - name: g1_carry_box_omniretarget_no_foot
+    format: ufo_pkl
+    train_path: ../../cache/motion_data/g1_carry_box_omniretarget_no_foot/g1_carry_box_omniretarget_no_foot_train_near10s_ufo.pkl
+    weight: 0.6
+
+  - name: g1_lafan
+    format: ufo_pkl
+    train_path: ../../humanoidverse/data/lafan_29dof_10s-clipped.pkl
+    weight: 0.4

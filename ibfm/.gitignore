@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+_wandb/
+wandb/
+runs/
+cache/
+checkpoint/
+*.log
+*.hdf5
+*.safetensors
+*.pth
+humanoidverse/data/*.pkl

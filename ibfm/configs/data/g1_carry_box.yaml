@@ -1,0 +1,12 @@
+robot_config: configs/robots/g1_29dof.yaml
+
+datasets:
+  - name: g1_carry_box
+    format: hhtools_carry_csv
+    source_path: ${oc.env:G1_CARRY_DATASET,../../data/g1_carry_box}
+    weight: 1.0
+    auto_build:
+      train_clip_seconds: 10.0
+      clip_stride_seconds: 10.0
+      keep_short: true
+      min_clip_seconds: 1.0

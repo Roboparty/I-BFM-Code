@@ -1,0 +1,66 @@
+half_size: [0.1675266, 0.1688563, 0.1800429]
+# The object track is expressed in a marker frame, not in the box's geometric
+# frame. These values align the fitted oriented bounding box with the OBJ.
+geom_pos: [0.00102584, -0.00160677, 0.00637628]
+geom_quat_wxyz: [0.07016202, 0.97153219, 0.22227911, 0.04236142]
+mass: 0.7
+friction: [0.9, 0.01, 0.001]
+
+# One delay step is one 50 Hz policy period (20 ms). RFI is sampled at every
+# 200 Hz physics step. These overrides are local to this carry experiment.
+domain_rand_overrides:
+  randomize_pd_gain: true
+  kp_range: [0.75, 1.25]
+  kd_range: [0.75, 1.25]
+  randomize_ctrl_delay: true
+  ctrl_delay_step_range: [0, 1]
+  randomize_torque_rfi: true
+  rfi_lim: 0.1
+  randomize_rfi_lim: false
+  friction_geom_names: "(left|right)_foot[1-7]_collision"
+  randomize_friction: true
+  friction_range: [0.4, 1.25]
+  friction_shared_random: true
+  # Equal-priority MuJoCo contact friction is combined componentwise with max().
+  # The lower terrain value therefore preserves the sampled sliding coefficient.
+  terrain_friction: [0.4, 0.005, 0.0001]
+
+ground_surface_height: 0.0
+phase_lift_clearance: 0.005
+observe_target_delta: true
+observe_object_present: true
+observe_task_id: true
+hand_contact_offsets:
+  - [0.11, -0.01, 0.0]
+  - [0.11, 0.01, 0.0]
+hand_capsule_segments:
+  - [[0.07, 0.0, 0.0], [0.15, -0.02, 0.0]]
+  - [[0.07, 0.0, 0.0], [0.15, 0.02, 0.0]]
+hand_contact_radius: 0.035
+observe_hand_spatial: true
+# Absolute randomized mass: 0.7 * [5/7, 10/7] = [0.5, 1.0] kg.
+mass_scale_range: [0.7142857142857143, 1.4285714285714286]
+friction_range: [0.6, 1.2]
+initial_position_noise: 0.02
+initial_velocity_noise: 0.05
+target_position_noise: 0.15
+disturbance_velocity: 0.0
+disturbance_interval_s: [3.0, 6.0]
+random_motion_start_probability: 0.5
+object_mocap_pose_randomization:
+  enabled: true
+  position_error_xyz_m: 0.02
+  rotation_error_rpy_deg: 2.0
+absent_position: [100.0, 100.0, 0.186028293]
+ground_center_height: 0.186028293
+reach_scale: 0.35
+lift_height: 0.35
+lifted_threshold: 0.18
+position_std: 0.20
+success_position_tolerance: 0.15
+success_speed_tolerance: 0.15
+success_upright: 0.90
+success_robot_upright: 0.85
+success_hold_steps: 25
+fall_root_height: 0.25
+fall_gravity_z: -0.25

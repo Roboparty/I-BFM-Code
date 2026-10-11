@@ -1,0 +1,12 @@
+robot_config: configs/robots/rp1_28dof.yaml
+
+datasets:
+  - name: rp1_lafan_h200_v2
+    format: robot_state_npz
+    source_path: ../../data/rp1_lafan_h200_v2/*.npz
+    weight: 1.0
+    auto_build:
+      train_clip_seconds: 10.0
+      clip_stride_seconds: 10.0
+      keep_short: true
+      min_clip_seconds: 1.0

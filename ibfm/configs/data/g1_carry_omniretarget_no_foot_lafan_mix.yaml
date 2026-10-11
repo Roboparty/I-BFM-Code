@@ -1,0 +1,16 @@
+robot_config: configs/robots/g1_29dof.yaml
+
+datasets:
+  # Match the 73.67M two-source training mixture while using the corrected
+  # grounded Carry cache. Approach-box motions are intentionally excluded.
+  # Weights are source-level and do not depend on the number of clips per pkl.
+  - name: g1_carry_box_omniretarget_no_foot
+    format: ufo_pkl
+    train_path: ../../cache/motion_data/g1_carry_box_omniretarget_no_foot/g1_carry_box_omniretarget_no_foot_train_near10s_grounded_mujoco_hysteresis_4p5_6cm_ufo.pkl
+    inference_path: ../../cache/motion_data/g1_carry_box_omniretarget_no_foot/g1_carry_box_omniretarget_no_foot_full_grounded_mujoco_hysteresis_4p5_6cm_ufo.pkl
+    weight: 0.5
+
+  - name: g1_lafan
+    format: ufo_pkl
+    train_path: ../../humanoidverse/data/lafan_29dof_10s-clipped.pkl
+    weight: 0.5

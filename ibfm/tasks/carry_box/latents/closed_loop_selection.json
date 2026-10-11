@@ -1,0 +1,16 @@
+{
+  "fallback_order": {
+    "-1": [
+      "yaw_0p60_topk_0050",
+      "yaw_0p40_topk_0100",
+      "yaw_0p50_topk_0050",
+      "original_166560_transport_turn"
+    ],
+    "1": [
+      "yaw_0p50_topk_0050",
+      "yaw_0p60_topk_0050",
+      "yaw_0p40_topk_0050",
+      "original_166560_transport_turn"
+    ]
+  }
+}

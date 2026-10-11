@@ -1,0 +1,69 @@
+half_size: [0.1675266, 0.1688563, 0.1800429]
+# The object track is expressed in a marker frame, not in the box's geometric
+# frame.  These values align the fitted oriented bounding box with the OBJ.
+geom_pos: [0.00102584, -0.00160677, 0.00637628]
+geom_quat_wxyz: [0.07016202, 0.97153219, 0.22227911, 0.04236142]
+# Nominal mass is the midpoint of the training randomization range. MJLab's
+# pseudo-inertia event scales mass and inertia together, preserving consistency.
+mass: 1.25
+friction: [0.9, 0.01, 0.001]
+# The active expert cache uses MuJoCo capsule-box surface distance with 4.5 cm
+# enter / 6 cm exit hysteresis. Online actor observations intentionally retain
+# the current strict ContactSensor.found values from the simulated environment.
+ground_surface_height: 0.0
+# Fallback used only by reference motions that do not contain stored labels.
+phase_lift_clearance: 0.005
+# Observation ablations preserve the 22D object-context schema by zeroing only
+# the selected channels. Both are enabled in the baseline task.
+observe_target_delta: true
+observe_object_present: true
+observe_task_id: true
+# Midpoints of the left/right hand collision capsules in their wrist-yaw body
+# frames, taken from the G1 MJCF hand collision geoms.
+hand_contact_offsets:
+  - [0.11, -0.01, 0.0]
+  - [0.11, 0.01, 0.0]
+# Full left/right collision-capsule center lines from the G1 MJCF. These are
+# used by offline MuJoCo distance labeling and online distance diagnostics.
+hand_capsule_segments:
+  - [[0.07, 0.0, 0.0], [0.15, -0.02, 0.0]]
+  - [[0.07, 0.0, 0.0], [0.15, 0.02, 0.0]]
+# Radius of the left/right hand collision capsules in the G1 MJCF.
+hand_contact_radius: 0.035
+# Policy object context additionally contains the two collision-proxy points in
+# the robot-root frame and their hand-minus-box vectors (12D total).
+observe_hand_spatial: true
+# Absolute randomized mass range: 1.25 * [0.8, 1.2] = [1.0, 1.5] kg.
+mass_scale_range: [0.8, 1.2]
+friction_range: [0.6, 1.2]
+initial_position_noise: 0.02
+initial_velocity_noise: 0.05
+target_position_noise: 0.15
+disturbance_velocity: 0.0
+disturbance_interval_s: [3.0, 6.0]
+random_motion_start_probability: 0.5
+# Episode-fixed error in the estimated marker-to-box transform. This perturbs
+# only the policy observation; box physics, rewards and evaluation truth remain
+# unchanged. The error is expressed in the tracked object-reference frame.
+object_mocap_pose_randomization:
+  enabled: true
+  position_error_xyz_m: 0.02
+  rotation_error_rpy_deg: 2.0
+# Object-free samples still share the replicated scene, so park their physical
+# box far away at a valid above-ground pose.
+absent_position: [100.0, 100.0, 0.186028293]
+# Waist action scales are shared with LAFAN through configs/robots/g1_29dof.yaml
+# so a checkpoint keeps the same control semantics across training stages.
+# Exact marker height that puts the rotated box geom's lowest point on z=0.
+ground_center_height: 0.186028293
+reach_scale: 0.35
+lift_height: 0.35
+lifted_threshold: 0.18
+position_std: 0.20
+success_position_tolerance: 0.15
+success_speed_tolerance: 0.15
+success_upright: 0.90
+success_robot_upright: 0.85
+success_hold_steps: 25
+fall_root_height: 0.25
+fall_gravity_z: -0.25

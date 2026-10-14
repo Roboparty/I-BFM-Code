@@ -119,9 +119,9 @@ PY
 
 ## 社区交流
 
-欢迎加入 **Party-BFM 微信交流群**，交流 I-BFM、LOGO、复现与人形机器人交互。扫描下方二维码入群；邀请过期后我们会更新图片。
+欢迎添加作者微信，交流 I-BFM、LOGO、复现与人形机器人交互。扫描下方二维码添加好友。
 
-<p align="center"><img src="assets/community/party-bfm-wechat.png" alt="Party-BFM 微信交流群二维码" width="360"></p>
+<p align="center"><img src="assets/community/author-wechat.png" alt="作者个人微信二维码" width="360"></p>
 
 ## 许可
 

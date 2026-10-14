@@ -119,9 +119,9 @@ This loads the entire selected shard into memory (about 28 GB on disk). The buff
 
 ## Community
 
-Join the **Party-BFM** WeChat group to discuss I-BFM, LOGO, reproductions, and humanoid interaction. Scan the QR code below to join. We will update the image when the invitation expires.
+To discuss I-BFM, LOGO, reproductions, and humanoid interaction, scan the QR code below to add the author on WeChat.
 
-<p align="center"><img src="assets/community/party-bfm-wechat.png" alt="Party-BFM WeChat group QR code" width="360"></p>
+<p align="center"><img src="assets/community/author-wechat.png" alt="Author's WeChat contact QR code" width="360"></p>
 
 ## License
 

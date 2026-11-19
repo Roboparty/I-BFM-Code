@@ -24,8 +24,6 @@ Click a preview to watch the full video on the project website.
 
 [![RP1 Carry Box simulation](assets/rp1/carry-box-preview.gif)](assets/rp1/carry-box.mp4)
 
-[Watch the full RP1 simulation video (44 seconds)](assets/rp1/carry-box.mp4),
-using the 249,839,616-step official-PD model and refined post-release standing.
 See [RP1 details](ibfm/docs/RP1_TRAINING.md) for model and scene settings.
 
 ## Method overview

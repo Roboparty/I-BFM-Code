@@ -110,7 +110,7 @@
     "model/g1_carry_intact_logmap166559744_solve_close_gpu/phase_latents/z_transport.pkl": "a7e1434b21d9b9f8630ac5decfbcb19819bf692f7a1e6569a99e807ffed5b5a5",
     "model/g1_carry_intact_logmap166559744_solve_close_gpu/phase_latents/z_turn.pkl": "ad2995ece543b1150a019978f13d18c3ac3af274cfa129e924c22b4c68d55a2e",
     "README.md": "ccf664526cd91e35a0ce66c9ad8e96f422bf6700c3a2478bdcfa2a3730301d40",
-    "README.zh-CN.md": "a843dc907057aba0041b6bcbead26eb58637416466c082ef0ca7bda337d48361",
+    "README.zh-CN.md": "84f2ffae79d64bbd8d36b445fe6ca1c77238dfdfc1eb63266df08fc2f82ef876",
     "requirements/runtime_gpu.txt": "84fdde6c9c354e66dbd71b0dd472bbc45a18560e34ef62475cf81522bae9384e",
     "requirements/unitree_workstation.txt": "f92538730e6004ef8223f7d49be9558a996406dd71f393eecc2a57f3eb436cca",
     "rl_policy/carry_recorder.py": "88d80260ca7d38c3a387e292ce27e6191aba431e00fb0033964174577492bca4",

@@ -40,7 +40,7 @@ export PYTHON_BIN="$PWD/.venv/bin/python"
 
 修改 `site/carry.yaml` 中的 LuMo 地址、刚体名称、世界/刚体坐标变换和目标点。
 提供的地址和变换来自原现场，必须核对本机安装。保留策略输入、PD、latent 和三阶段
-标定配置。`site/`、`external/`、运行日志和现场标定结果均不上传到 Git。
+标定配置。
 
 共享基类及 `phase_controller_profile` 中的旧步数是兼容名称，不代表加载旧模型。
 本包只包含 166.560M actor 和对应的搬箱 latent。

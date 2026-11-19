@@ -33,6 +33,7 @@ Click a preview to watch the full video on the project website.
 | `ibfm/tasks/push_box/` | Push Box interactive script, controller, and latents |
 | `ibfm/tasks/kick_box/` | Kick Box interactive scripts, controller, and latents |
 | `checkpoints/ibfm-166m/` | Selected checkpoint and metadata |
+| [`deploy/g1_carry_box_166m/`](deploy/g1_carry_box_166m/) | G1 Carry Box real-robot deployment, 166.560M ONNX actor, solve-close latents, calibration, and gamepad control |
 
 ## Setup
 

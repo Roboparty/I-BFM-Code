@@ -1,0 +1,2386 @@
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import time
+import numpy as np
+from typing import Dict, Any, Type
+import sched
+from termcolor import colored
+from sshkeyboard import listen_keyboard
+from pathlib import Path
+import copy
+import joblib
+import json
+import pickle
+
+
+sys.path.append(".")
+
+
+from loguru import logger
+
+# Re-use utilities from the existing sim2real package
+from utils.strings import resolve_matching_names_values
+from utils.onnx_module import Timer
+from rl_policy.observations import Observation, ObsGroup
+from rl_policy.utils.state_processor import StateProcessor
+from rl_policy.utils.command_sender import CommandSender
+
+
+def _default_realtime_z(norm_ref: float) -> np.ndarray:
+    z = np.zeros(256, dtype=np.float32)
+    z[0] = float(norm_ref)
+    return z
+
+
+def _resolve_model_relative_context_path(
+    model_path: str,
+    exp_config: Dict[str, Any],
+    default_ctx_dir: str,
+    fallback_ctx_dirs: tuple[str, ...] = (),
+) -> Path:
+    ctx_path = Path(str(exp_config["ctx_path"])).expanduser()
+    if ctx_path.is_absolute():
+        return ctx_path
+
+    model_export_dir = Path(model_path).expanduser().resolve(strict=False).parent
+    model_root = model_export_dir.parent
+    candidates: list[Path] = []
+
+    if "ctx_dir" in exp_config:
+        candidates.append(model_root / str(exp_config["ctx_dir"]) / ctx_path)
+    else:
+        candidates.append(model_root / default_ctx_dir / ctx_path)
+        for ctx_dir in fallback_ctx_dirs:
+            candidates.append(model_root / ctx_dir / ctx_path)
+
+    # Backward compatibility: older configs used paths relative to either the
+    # model root or the exported/ directory.
+    candidates.append(model_root / ctx_path)
+    candidates.append(model_export_dir / ctx_path)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(resolved)
+
+    for candidate in deduped:
+        if candidate.is_file():
+            return candidate
+
+    tried = "\n".join(f"  - {candidate}" for candidate in deduped)
+    raise FileNotFoundError(
+        f"Could not resolve context file ctx_path={ctx_path!s} for model_path={model_path!s}.\n"
+        f"Tried:\n{tried}"
+    )
+
+# -------------------------------------------------------------------------------------------------
+# High-level RL policy that plugs into the existing framework
+# -------------------------------------------------------------------------------------------------
+class UFODeployPolicy:
+    def __init__(
+        self,
+        robot_config: Dict[str, Any],
+        policy_config: Dict[str, Any],
+        exp_config: Dict[str, Any],
+        model_path: str,
+        rl_rate: int = 50,
+        pico_control: bool = False,
+        pico_control_addr: str = "tcp://127.0.0.1:28704",
+        read_only: bool = False,
+        record_dir: str | None = None,
+    ) -> None:
+        self.read_only = bool(read_only)
+        self.data_recorder = None
+        robot_type = robot_config["ROBOT_TYPE"]
+        if robot_type == "g1_real":
+            if os.environ.get("UFO_REAL_ROBOT_OK") != "1":
+                raise RuntimeError(
+                    "Refusing to start real robot control without UFO_REAL_ROBOT_OK=1."
+                )
+            controller_profile = str(
+                exp_config.get("phase_controller_profile", "legacy_deploy")
+            ).lower()
+            if (
+                controller_profile == "h20_reward736"
+                and os.environ.get("UFO_H20_PAIR80M_EXPERIMENTAL_OK") != "1"
+            ):
+                raise RuntimeError(
+                    "Refusing experimental H20 pair-80M real robot control without "
+                    "UFO_H20_PAIR80M_EXPERIMENTAL_OK=1."
+                )
+            if (
+                controller_profile == "newintact80m_hybrid_direct_place"
+                and os.environ.get("UFO_NEWINTACT80M_HYBRID_EXPERIMENTAL_OK") != "1"
+            ):
+                raise RuntimeError(
+                    "Refusing experimental newintact 80.1M hybrid direct-place real "
+                    "robot control without "
+                    "UFO_NEWINTACT80M_HYBRID_EXPERIMENTAL_OK=1."
+                )
+            if (
+                controller_profile == "bestcarry140935168_strong"
+                and os.environ.get("UFO_BESTCARRY140935168_STRONG_EXPERIMENTAL_OK")
+                != "1"
+            ):
+                raise RuntimeError(
+                    "Refusing experimental best-carry 140.935M strong real robot "
+                    "control without "
+                    "UFO_BESTCARRY140935168_STRONG_EXPERIMENTAL_OK=1."
+                )
+            if (
+                controller_profile == "intact_logmap150544384_strong"
+                and os.environ.get(
+                    "UFO_INTACT_LOGMAP150544384_STRONG_GPU_EXPERIMENTAL_OK"
+                )
+                != "1"
+            ):
+                raise RuntimeError(
+                    "Refusing experimental INTACT-logmap 150.544M GPU real robot "
+                    "control without "
+                    "UFO_INTACT_LOGMAP150544384_STRONG_GPU_EXPERIMENTAL_OK=1."
+                )
+            if (
+                str(exp_config.get("type", "")).lower() == "lafan_tracking"
+                and not self.read_only
+                and os.environ.get("UFO_LAFAN140935168_EXPERIMENTAL_OK") != "1"
+            ):
+                raise RuntimeError(
+                    "Refusing experimental 140.935M LAFAN real robot control without "
+                    "UFO_LAFAN140935168_EXPERIMENTAL_OK=1."
+                )
+            if (
+                str(exp_config.get("type", "")).lower() == "lafan_tracking"
+                and bool(exp_config.get("suspended_only", False))
+                and not self.read_only
+                and os.environ.get("UFO_LAFAN_SUSPENDED_TEST_OK") != "1"
+            ):
+                raise RuntimeError(
+                    "Refusing suspended-only LAFAN real robot control without "
+                    "UFO_LAFAN_SUSPENDED_TEST_OK=1."
+                )
+            network_interface = robot_config.get("INTERFACE", None)
+            control_backend = str(robot_config.get("CONTROL_BACKEND", "g1_interface")).lower()
+            if self.read_only and control_backend != "unitree_sdk2py":
+                raise RuntimeError("--read-only requires the official unitree_sdk2py backend")
+            if self.read_only and (
+                bool(robot_config.get("ENABLE_LOW_LEVEL_COMMANDS", False))
+                or os.environ.get("UFO_ALLOW_LOW_LEVEL_COMMANDS") == "1"
+            ):
+                raise RuntimeError("--read-only requires both low-level command gates to remain disabled")
+            robot_config["READ_ONLY"] = self.read_only
+            if control_backend == "unitree_sdk2py":
+                from rl_policy.unitree_sdk2_adapter import ControlMode, UnitreeSdk2G1Interface
+
+                self.robot = UnitreeSdk2G1Interface(network_interface, robot_config)
+                requested_mode = ControlMode.PR
+            elif control_backend == "g1_interface":
+                # Compatibility path for the original onboard native extension.
+                sys.path.append("/home/unitree/unitree_sdk2_bfm/build/lib")
+                import g1_interface
+
+                self.robot = g1_interface.G1Interface(network_interface)
+                requested_mode = g1_interface.ControlMode.PR
+            else:
+                raise ValueError(
+                    f"Unsupported G1 CONTROL_BACKEND={control_backend!r}; "
+                    "expected 'unitree_sdk2py' or 'g1_interface'"
+                )
+            try:
+                self.robot.set_control_mode(requested_mode)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Failed to set G1 control mode to PR; refusing to start real robot control."
+                ) from exc
+            robot_config["robot"] = self.robot
+        # Plug-in our custom state processor & command sender
+        self.state_processor = StateProcessor(robot_config, policy_config["isaac_joint_names"])
+        self.command_sender = CommandSender(robot_config, policy_config)
+
+        self.rl_dt = 1.0 / rl_rate
+        self.t = 0
+
+        self.policy_config = policy_config
+        self.exp_config = exp_config
+        self.task_type = exp_config["type"]
+        self.z_index = 0
+
+        self.setup_policy(model_path)
+        self.obs_cfg = policy_config["observation"]
+
+        self.isaac_joint_names = policy_config["isaac_joint_names"]
+        self.num_dofs = len(self.isaac_joint_names)
+
+        default_joint_pos_dict = policy_config["default_joint_pos"]
+        joint_indices, joint_names, default_joint_pos = resolve_matching_names_values(
+            default_joint_pos_dict,
+            self.isaac_joint_names,
+            preserve_order=True,
+            strict=False,
+        )
+        self.default_dof_angles = np.zeros(len(self.isaac_joint_names))
+        self.last_action  = np.zeros(len(self.isaac_joint_names))
+        self.default_dof_angles[joint_indices] = default_joint_pos
+
+        action_scale_cfg = policy_config["action_scale"]
+        self.action_scale = np.ones((self.num_dofs))
+        self.action_rescale = policy_config["action_rescale"]
+        if isinstance(action_scale_cfg, float):
+            self.action_scale *= action_scale_cfg
+        elif isinstance(action_scale_cfg, dict):
+            joint_ids, joint_names, action_scales = resolve_matching_names_values(
+                action_scale_cfg, self.isaac_joint_names, preserve_order=True
+            )
+            self.action_scale[joint_ids] = action_scales
+        else:
+            raise ValueError(f"Invalid action scale type: {type(action_scale_cfg)}")
+
+        self.policy_joint_names = policy_config["policy_joint_names"]
+        self.num_actions = len(self.policy_joint_names)
+        self.controlled_joint_indices = [
+            self.isaac_joint_names.index(name)
+            for name in self.policy_joint_names
+        ]
+
+        # Keypress/control state
+        self.use_policy_action = False
+        self.pico_control_enabled = bool(pico_control)
+        self.pico_control_addr = str(pico_control_addr)
+        self.pico_control_sock = None
+        self.last_pico_buttons: Dict[str, bool] = {}
+        self.stop_latched = False
+        self.pico_enable_released_after_stop = True
+        self.stop_latch_enable_released_after_stop = True
+        self._last_safe_stop_warning = 0.0
+        self._last_invalid_z_warning = 0.0
+        self._last_z_timeout_warning = 0.0
+        self._last_stop_latch_warning = 0.0
+        self._last_recorder_warning = 0.0
+        self._exit_requested = False
+        self._exit_signal_name: str | None = None
+
+        self.first_time_init = True
+        self.init_count = 0
+        self.get_ready_state = False
+        self.has_valid_low_state = False
+
+        # Joint limits
+        joint_indices, joint_names, joint_pos_lower_limit = (
+            resolve_matching_names_values(
+                robot_config["joint_pos_lower_limit"],
+                self.isaac_joint_names,
+                preserve_order=True,
+                strict=False,
+            )
+        )
+        self.joint_pos_lower_limit = np.zeros(self.num_dofs)
+        self.joint_pos_lower_limit[joint_indices] = joint_pos_lower_limit
+
+        joint_indices, joint_names, joint_pos_upper_limit = (
+            resolve_matching_names_values(
+                robot_config["joint_pos_upper_limit"],
+                self.isaac_joint_names,
+                preserve_order=True,
+                strict=False,
+            )
+        )
+        self.joint_pos_upper_limit = np.zeros(self.num_dofs)
+        self.joint_pos_upper_limit[joint_indices] = joint_pos_upper_limit
+
+        joint_indices, joint_names, joint_velocity_limit = (
+            resolve_matching_names_values(
+                robot_config["joint_velocity_limit"],
+                self.isaac_joint_names,
+                preserve_order=True,
+                strict=False,
+            )
+        )
+        self.joint_velocity_limit = np.full(self.num_dofs, np.inf)
+        self.joint_velocity_limit[joint_indices] = joint_velocity_limit
+
+        effort_limit_cfg = robot_config.get("joint_effort_limit", {})
+        self.joint_effort_limit = np.full(self.num_dofs, np.nan)
+        if effort_limit_cfg:
+            joint_indices, joint_names, joint_effort_limit = (
+                resolve_matching_names_values(
+                    effort_limit_cfg,
+                    self.isaac_joint_names,
+                    preserve_order=True,
+                    strict=False,
+                )
+            )
+            self.joint_effort_limit[joint_indices] = joint_effort_limit
+        self.q_target_slew_safety_factor = float(
+            policy_config.get(
+                "q_target_slew_safety_factor",
+                robot_config.get("Q_TARGET_SLEW_SAFETY_FACTOR", 0.5),
+            )
+        )
+        if not np.isfinite(self.q_target_slew_safety_factor) or self.q_target_slew_safety_factor < 0.0:
+            raise ValueError("q_target_slew_safety_factor must be a finite non-negative value")
+        if self.q_target_slew_safety_factor == 0.0:
+            logger.info("q_target slew limiter disabled by policy configuration")
+        self.last_cmd_q: np.ndarray | None = None
+
+        # ------------------------------------------------------
+        # Joystick / keyboard setup (mirrors base_policy logic)
+        # ------------------------------------------------------
+        if robot_config.get("USE_JOYSTICK", False):
+            print("Using joystick")
+            self.use_joystick = True
+            self.wc_msg = None  # type: ignore
+            self.last_wc_msg = self.robot.read_wireless_controller()
+            print("Wireless Controller Initialized")
+        else:
+            import threading
+            print("Using keyboard")
+            self.use_joystick = False
+            self.key_listener_thread = threading.Thread(
+                target=self.start_key_listener, daemon=True
+            )
+            self.key_listener_thread.start()
+
+        if self.pico_control_enabled:
+            self.setup_pico_control()
+
+        # Setup observations after all processors are ready. Carry builds its
+        # object-aware actor observation in a dedicated runtime below.
+        self.setup_observations()
+
+        # Initialize variables
+        self.start_motion = False
+        logger.info(f"task_type={self.task_type}")
+
+        # Task-specific setup
+        if self.task_type == "tracking":
+            self.ctx_source = str(exp_config.get("ctx_source", "pkl")).lower()
+            if self.ctx_source not in {"pkl", "zmq"}:
+                raise ValueError(f"Invalid ctx_source={self.ctx_source}, expected 'pkl' or 'zmq'")
+
+            if self.ctx_source == "pkl":
+                ctx_path = _resolve_model_relative_context_path(
+                    model_path,
+                    exp_config,
+                    default_ctx_dir="tracking_inference_mjlab",
+                    fallback_ctx_dirs=("tracking_inference",),
+                )
+                logger.info(f"Loading tracking context from {ctx_path}")
+                self.ctx = joblib.load(ctx_path)
+                self.ctx_zmq = None
+                self.ctx_window = None
+                self.ctx_norm_ref = float(np.linalg.norm(self.ctx[0]))
+            else:
+                import zmq
+                from collections import deque
+
+                self.ctx = None
+                self.ctx_norm_ref = float(exp_config.get("ctx_norm_ref", 16.0))
+                self.ctx_window = deque(maxlen=int(exp_config.get("window_size", 1)))
+                self.ctx_zmq_timeout_s = max(
+                    0.0,
+                    float(exp_config.get("ctx_zmq_timeout_ms", 200.0)) / 1000.0,
+                )
+                self.ctx_zmq_start_monotonic = time.monotonic()
+                self.ctx_last_z_monotonic: float | None = None
+
+                zmq_addr = str(exp_config.get("ctx_zmq_addr", "tcp://127.0.0.1:28711"))
+                logger.info(
+                    f"Tracking context from ZMQ: {zmq_addr} "
+                    f"(norm_ref={self.ctx_norm_ref}, timeout={self.ctx_zmq_timeout_s * 1000:.0f} ms)"
+                )
+                zctx = zmq.Context.instance()
+                sock = zctx.socket(zmq.SUB)
+                sock.setsockopt(zmq.SUBSCRIBE, b"")
+                sock.setsockopt(zmq.CONFLATE, 1)
+                sock.setsockopt(zmq.RCVTIMEO, 0)
+                sock.setsockopt(zmq.LINGER, 0)
+                sock.connect(zmq_addr)
+                self.ctx_zmq = sock
+                self.ctx_latest = _default_realtime_z(self.ctx_norm_ref)
+
+            logger.info(f"t_start={exp_config['start']}, t_end={exp_config['end']}, t_stop={exp_config['stop']}")
+            self.t_start = exp_config['start']
+            self.t_end = exp_config['end']
+            self.t_stop = exp_config['stop']
+
+            logger.info(f"gamma={exp_config['gamma']}, window_size={exp_config['window_size']}")
+            self.gamma = exp_config['gamma']  # discount factor
+            self.window_size = exp_config['window_size']  # context window size
+
+        elif self.task_type == "reward":
+            self.z_index = 0
+            reward_path = _resolve_model_relative_context_path(
+                model_path,
+                exp_config,
+                default_ctx_dir="reward_inference_mjlab",
+                fallback_ctx_dirs=("reward_inference",),
+            )
+            logger.info(f"Loading reward context from {reward_path}")
+            with open(reward_path, "rb") as f:
+                self.z_dict = pickle.load(f)
+                self.z_dict_raw = copy.deepcopy(self.z_dict)
+                logger.info(colored(f"\n\nAvailable z_dict={list(self.z_dict_raw.keys())}", "green"))
+
+            if "selected_rewards_filter_z" in exp_config:
+                selected_rewards_filter_z = exp_config['selected_rewards_filter_z']
+                logger.info(colored(f"\nSelected_rewards_filter_z read from config: {selected_rewards_filter_z}", "green"))
+            else:
+                raise ValueError("For task_type=reward-multiple-z-selection, selected_rewards_filter_z must be provided in the config file")
+
+            self.z_dict = {}
+            self.selected_z_names = []
+
+            # Iterate in the order of selected_rewards_filter_z
+            if isinstance(selected_rewards_filter_z, list):
+                for dct in selected_rewards_filter_z:
+                    k = dct['reward']
+                    selected_z_ids = dct['z_ids']
+                    if k in self.z_dict_raw:
+                        v = self.z_dict_raw[k]
+                        self.z_dict[k] = []
+                        for z_id in selected_z_ids:
+                            if z_id < len(v):
+                                self.z_dict[k].append(v[z_id])
+                                self.selected_z_names.append(f"""Reward="{k}"__Z_id={z_id}""")
+                                logger.info(f"""Added Reward="{k}"__Z_id={z_id} to self.z_dict""")
+            elif isinstance(selected_rewards_filter_z, dict):
+                for k in selected_rewards_filter_z.keys():
+                    if k in self.z_dict_raw:
+                        v = self.z_dict_raw[k]
+                        self.z_dict[k] = []
+                        for z_id in selected_rewards_filter_z[k]:
+                            if z_id < len(v):
+                                self.z_dict[k].append(v[z_id])
+                                self.selected_z_names.append(f"""Reward="{k}"__Z_id={z_id}""")
+                                logger.info(f"""Added Reward="{k}"__Z_id={z_id} to self.z_dict""")
+
+            logger.info(colored(f"\n\nValid z_dict contains: {list(self.z_dict.keys())}", "blue"))
+            if len(self.z_dict) == 0:
+                raise ValueError("After filtering, self.z_dict is empty. Please check your selected_rewards_filter_z and available z_dict")
+            self.num_selected_rewards = len(self.z_dict.keys())
+            self.num_selected_z = len(self.selected_z_names)
+            self.selected_z = np.concatenate([val for val in self.z_dict.values()], axis=0)
+
+            logger.info(f"self.num_selected_z={self.num_selected_z}, self.selected_z.shape={self.selected_z.shape}")
+            if self.num_selected_rewards == 1:
+                logger.info(colored(f"Only one reward is selected, make sure that is what you want", "red"))
+
+        # new goal reaching code
+        elif self.task_type == "goal":
+            self.z_index = 0
+            goal_path = _resolve_model_relative_context_path(
+                model_path,
+                exp_config,
+                default_ctx_dir="goal_inference_mjlab",
+                fallback_ctx_dirs=("goal_inference",),
+            )
+            logger.info(f"Loading goal context from {goal_path}")
+            with open(goal_path, "rb") as f:
+                self.z_dict = joblib.load(f)
+                self.z_dict_raw = copy.deepcopy(self.z_dict)
+                logger.info(colored(f"\n\nAvailable z_dict={list(self.z_dict_raw.keys())}", "green"))
+            if "selected_goals" in exp_config:
+               selected_goals = exp_config['selected_goals']
+               logger.info(colored(f"\nSelected_goals read from config: {selected_goals}", "green"))
+            else:
+                selected_goals = self.z_dict.keys()
+            self.z_dict = {
+                k: self.z_dict[k] for k in selected_goals if k in self.z_dict
+            }
+
+            logger.info(colored(f"\n\nValid z_dict contains: {list(self.z_dict.keys())} (Total = {len(self.z_dict)})", "blue"))
+
+            self.num_selected_goals = len(self.z_dict.keys())
+            if self.num_selected_goals ==1:
+                logger.info(colored(f"Only one goal is selected, make sure that is what you want", "red"))
+
+        elif self.task_type == "carry":
+            from rl_policy.carry_runtime import CarryRuntime
+
+            self.carry_runtime = CarryRuntime(
+                exp_config=exp_config,
+                policy_config=policy_config,
+                joint_names=self.isaac_joint_names,
+                default=self.default_dof_angles,
+                dt=self.rl_dt,
+            )
+            if self.carry_runtime.deployment_calibration_enabled:
+                if self.carry_runtime.deployment_contact_calibration_enabled:
+                    logger.warning(
+                        "Carry deployment calibration required before R1: press A for "
+                        "default pose, then B starts a 50-valid-frame pelvis capture; "
+                        "place the upright box and B starts its 50-valid-frame capture; "
+                        "suspend robot, press A to release pose, tap X for each no-contact "
+                        "sample and Y for each contact sample, B=finish; press A and then R1"
+                    )
+                else:
+                    logger.warning(
+                        "Carry deployment calibration required before R1: press A for "
+                        "default pose, then B starts the pelvis capture; place the upright "
+                        "box and press B for box-height capture. FK-only hand contact uses "
+                        "fixed thresholds, so no X/Y hand calibration is required; after "
+                        "automatic completion keep the default pose armed and press R1"
+                    )
+                if self.carry_runtime.saved_deployment_calibration_available:
+                    logger.warning(
+                        "Saved Carry calibration found at {}; press L1+R1 to "
+                        "validate, apply, and start directly. A/default pose is "
+                        "recommended for normal standing starts but is intentionally "
+                        "not required for fallen-recovery tests".format(
+                            self.carry_runtime.saved_calibration_source_path
+                        )
+                    )
+                else:
+                    logger.info(
+                        "No reusable Carry calibration found; complete the normal "
+                        "pelvis/box{} calibration once to create {}".format(
+                            "/contact"
+                            if self.carry_runtime.deployment_contact_calibration_enabled
+                            else "",
+                            self.carry_runtime.calibration_result_path
+                        )
+                    )
+            input_shape = tuple(self.onnx_policy_session.get_inputs()[0].shape)
+            expected = int(self.carry_runtime.expected_input_dim)
+            if input_shape[-1] not in (None, "None", expected):
+                raise ValueError(f"Carry ONNX input is {input_shape}, expected final dimension {expected}")
+            self.carry_approach_policy_session = None
+            self.carry_approach_policy = None
+            if self.carry_runtime.approach_model_path is not None:
+                (
+                    self.carry_approach_policy_session,
+                    self.carry_approach_policy,
+                ) = self._load_auxiliary_policy(
+                    self.carry_runtime.approach_model_path,
+                    label="Carry approach",
+                )
+                approach_shape = tuple(
+                    self.carry_approach_policy_session.get_inputs()[0].shape
+                )
+                if approach_shape[-1] not in (None, "None", expected):
+                    raise ValueError(
+                        f"Carry approach ONNX input is {approach_shape}, "
+                        f"expected final dimension {expected}"
+                    )
+            logger.info(
+                f"Carry runtime ready: ONNX={expected}D, "
+                f"mocap_source={self.carry_runtime.mocap_source}, "
+                f"runtime_mode={self.carry_runtime.runtime_mode}"
+            )
+
+        elif self.task_type == "lafan_tpose":
+            from rl_policy.lafan_tpose_runtime import LafanTposeRuntime
+
+            self.lafan_tpose_runtime = LafanTposeRuntime(
+                exp_config=exp_config,
+                joint_names=self.isaac_joint_names,
+                default=self.default_dof_angles,
+            )
+            input_shape = tuple(self.onnx_policy_session.get_inputs()[0].shape)
+            expected = int(exp_config.get("expected_input_dim", 755))
+            if input_shape[-1] not in (None, "None", expected):
+                raise ValueError(f"LAFAN T-pose ONNX input is {input_shape}, expected final dimension {expected}")
+            logger.info(
+                f"LAFAN T-pose runtime ready: ONNX={expected}D, "
+                "proprioception only, object_present=0, task_id=0, mocap=disabled"
+            )
+
+        elif self.task_type == "lafan_tracking":
+            from rl_policy.lafan_tpose_runtime import LafanTrackingRuntime
+
+            self.lafan_tracking_runtime = LafanTrackingRuntime(
+                exp_config=exp_config,
+                joint_names=self.isaac_joint_names,
+                default=self.default_dof_angles,
+            )
+            input_shape = tuple(self.onnx_policy_session.get_inputs()[0].shape)
+            expected = int(exp_config.get("expected_input_dim", 755))
+            if input_shape[-1] not in (None, "None", expected):
+                raise ValueError(
+                    f"LAFAN tracking ONNX input is {input_shape}, "
+                    f"expected final dimension {expected}"
+                )
+            logger.info(
+                "LAFAN tracking runtime ready: ONNX={}D, motion_id={} name={} "
+                "rows={} range=[{}, {}], proprioception only, mocap=disabled".format(
+                    expected,
+                    self.lafan_tracking_runtime.motion_id,
+                    self.lafan_tracking_runtime.motion_name,
+                    self.lafan_tracking_runtime.latents.shape[0],
+                    self.lafan_tracking_runtime.start_index,
+                    self.lafan_tracking_runtime.end_index,
+                )
+            )
+
+        else:
+            raise ValueError(f"Unsupported task type: {self.task_type}")
+
+        if record_dir is not None:
+            if self.task_type not in {"carry", "lafan_tracking"}:
+                raise ValueError(
+                    "--record-dir is currently supported only for carry and lafan_tracking tasks"
+                )
+            from rl_policy.carry_recorder import CarryRunRecorder
+
+            if self.task_type == "carry":
+                recording = "policy-visible carry mocap and G1 joint/control state"
+                mocap_semantics = (
+                    "CarryMocapFrame after the configured LuMo transforms, tracking "
+                    "alignment, target handling, and contact estimation; null when no "
+                    "carry observation was built in that control cycle"
+                )
+                controller_profile = str(
+                    self.exp_config.get("phase_controller_profile", "legacy_deploy")
+                )
+                runtime_mode = str(self.carry_runtime.runtime_mode)
+                mocap_source = str(self.carry_runtime.mocap_source)
+            else:
+                recording = "proprio-only LAFAN tracking and G1 joint/control state"
+                mocap_semantics = "disabled; LAFAN object/task observation channels are zero"
+                controller_profile = "lafan_tracking"
+                runtime_mode = "lafan_tracking"
+                mocap_source = "disabled"
+
+            self.data_recorder = CarryRunRecorder(
+                record_dir,
+                {
+                    "recording": recording,
+                    "mocap_semantics": mocap_semantics,
+                    "joint_names": list(self.isaac_joint_names),
+                    "policy_joint_names": list(self.policy_joint_names),
+                    "rl_rate_hz": float(1.0 / self.rl_dt),
+                    "read_only": self.read_only,
+                    "controller_profile": controller_profile,
+                    "runtime_mode": runtime_mode,
+                    "mocap_source": mocap_source,
+                    "actor_inertial_source": (
+                        str(self.carry_runtime.actor_inertial_source)
+                        if self.task_type == "carry"
+                        else "onboard_imu"
+                    ),
+                    "deployment_calibration": (
+                        self.carry_runtime.deployment_calibration_snapshot()
+                        if self.task_type == "carry"
+                        and self.carry_runtime.deployment_calibration_enabled
+                        else None
+                    ),
+                    "motion_id": self.exp_config.get("motion_id"),
+                    "motion_name": self.exp_config.get("motion_name"),
+                    "model_path": str(Path(model_path).expanduser().resolve(strict=False)),
+                    "onnx_requested_providers": list(self.onnx_requested_providers),
+                    "onnx_active_providers": list(
+                        self.onnx_policy_session.get_providers()
+                    ),
+                    "onnx_warmup": dict(self.onnx_warmup_summary),
+                },
+            )
+            logger.info(f"Local policy data recording: {self.data_recorder.run_dir}")
+
+
+    def setup_policy(self, model_path):
+        # load onnx policy
+        import onnxruntime
+        logger.info(f"Loading onnx policy from {model_path}")
+        providers = self.policy_config.get("onnx_providers", ["CPUExecutionProvider"])
+        if isinstance(providers, str):
+            providers = [providers]
+        if not isinstance(providers, list) or not all(isinstance(item, str) for item in providers):
+            raise ValueError("policy_config['onnx_providers'] must be a string or list of strings")
+        if len(providers) == 0:
+            providers = ["CPUExecutionProvider"]
+        self.onnx_requested_providers = list(providers)
+        available_providers = onnxruntime.get_available_providers()
+        unavailable = [item for item in providers if item not in available_providers]
+        if unavailable:
+            raise RuntimeError(
+                f"requested ONNX providers unavailable: {unavailable}; "
+                f"available={available_providers}"
+            )
+        required_provider = self.policy_config.get("require_onnx_provider")
+        if required_provider is not None and required_provider not in providers:
+            raise RuntimeError(
+                f"required ONNX provider {required_provider!r} is not requested: {providers}"
+            )
+        logger.info(
+            f"ONNX Runtime requested providers: {providers}; available={available_providers}"
+        )
+        self.onnx_policy_session = onnxruntime.InferenceSession(
+            model_path,
+            providers=providers,
+        )
+        active_providers = self.onnx_policy_session.get_providers()
+        if required_provider is not None and required_provider not in active_providers:
+            raise RuntimeError(
+                f"required ONNX provider {required_provider!r} is not active: "
+                f"{active_providers}"
+            )
+        logger.info(f"ONNX Runtime active providers: {active_providers}")
+        self.onnx_active_providers = list(active_providers)
+        self.onnx_input_name = self.onnx_policy_session.get_inputs()[0].name
+        self.onnx_output_name = self.onnx_policy_session.get_outputs()[0].name
+        warmup_runs = int(self.policy_config.get("onnx_warmup_runs", 0))
+        if not 0 <= warmup_runs <= 1000:
+            raise ValueError("policy_config['onnx_warmup_runs'] must be in [0, 1000]")
+        self.onnx_warmup_summary = {"runs": warmup_runs, "elapsed_ms": []}
+        if warmup_runs:
+            input_meta = self.onnx_policy_session.get_inputs()[0]
+            input_shape = tuple(input_meta.shape)
+            if len(input_shape) != 2 or not isinstance(input_shape[-1], int):
+                raise RuntimeError(
+                    f"ONNX warm-up requires a fixed rank-2 input, got {input_shape}"
+                )
+            warmup_input = np.zeros((1, int(input_shape[-1])), dtype=np.float32)
+            latent_dim = int(
+                self.policy_config.get("onnx_warmup_tail_latent_dim", 0)
+            )
+            if not 0 <= latent_dim <= warmup_input.shape[1]:
+                raise ValueError(
+                    "policy_config['onnx_warmup_tail_latent_dim'] must fit the ONNX input"
+                )
+            if latent_dim:
+                warmup_input[0, -latent_dim] = float(np.sqrt(latent_dim))
+            elapsed_ms = []
+            for _ in range(warmup_runs):
+                started = time.perf_counter()
+                output = self.onnx_policy_session.run(
+                    [self.onnx_output_name],
+                    {self.onnx_input_name: warmup_input},
+                )[0]
+                elapsed_ms.append((time.perf_counter() - started) * 1000.0)
+                if not np.all(np.isfinite(output)):
+                    raise RuntimeError("non-finite ONNX output during warm-up")
+            steady_ms = elapsed_ms[1:] if len(elapsed_ms) > 1 else elapsed_ms
+            self.onnx_warmup_summary = {
+                "runs": warmup_runs,
+                "first_ms": float(elapsed_ms[0]),
+                "steady_mean_ms": float(np.mean(steady_ms)),
+                "steady_p95_ms": float(np.percentile(steady_ms, 95)),
+                "steady_max_ms": float(np.max(steady_ms)),
+            }
+            logger.info(
+                "ONNX warm-up complete: runs={} first={:.3f}ms steady_mean={:.3f}ms "
+                "steady_p95={:.3f}ms steady_max={:.3f}ms "
+                "(outputs discarded; no command publication)".format(
+                    warmup_runs,
+                    self.onnx_warmup_summary["first_ms"],
+                    self.onnx_warmup_summary["steady_mean_ms"],
+                    self.onnx_warmup_summary["steady_p95_ms"],
+                    self.onnx_warmup_summary["steady_max_ms"],
+                )
+            )
+
+        def policy_act(obs):
+            return self.onnx_policy_session.run([self.onnx_output_name], {self.onnx_input_name: obs})[0]
+        self.policy = policy_act
+
+    def _load_auxiliary_policy(self, model_path: str, *, label: str):
+        import onnxruntime
+
+        providers = self.policy_config.get("onnx_providers", ["CPUExecutionProvider"])
+        if isinstance(providers, str):
+            providers = [providers]
+        available_providers = onnxruntime.get_available_providers()
+        unavailable = [item for item in providers if item not in available_providers]
+        if unavailable:
+            raise RuntimeError(
+                f"requested {label} ONNX providers unavailable: {unavailable}; "
+                f"available={available_providers}"
+            )
+        logger.info(f"Loading {label} ONNX policy from {model_path}")
+        session = onnxruntime.InferenceSession(model_path, providers=providers)
+        required_provider = self.policy_config.get("require_onnx_provider")
+        if required_provider is not None and required_provider not in session.get_providers():
+            raise RuntimeError(
+                f"required {label} ONNX provider {required_provider!r} is not active: "
+                f"{session.get_providers()}"
+            )
+        input_name = session.get_inputs()[0].name
+        output_name = session.get_outputs()[0].name
+
+        def policy_act(obs):
+            return session.run([output_name], {input_name: obs})[0]
+
+        return session, policy_act
+
+    def setup_observations(self):
+        """Setup observations for policy inference"""
+        self.observations: Dict[str, ObsGroup] = {}
+        self.reset_callbacks = []
+        self.update_callbacks = []
+
+        # Create observation instances based on config
+        for obs_group, obs_items in self.obs_cfg.items():
+            print(f"obs_group: {obs_group}")
+            obs_funcs = {}
+            for obs_name, obs_config in obs_items.items():
+                obs_class: Type[Observation] = Observation.registry[obs_name]
+                obs_func = obs_class(env=self, **obs_config)
+                obs_funcs[obs_name] = obs_func
+                self.reset_callbacks.append(obs_func.reset)
+                self.update_callbacks.append(obs_func.update)
+                print(f"\t{obs_name}: {obs_config}")
+            self.observations[obs_group] = ObsGroup(obs_group, obs_funcs)
+
+    def reset(self):
+        for reset_callback in self.reset_callbacks:
+            reset_callback()
+        if hasattr(self, "carry_runtime"):
+            self.carry_runtime.reset()
+        if hasattr(self, "lafan_tpose_runtime"):
+            self.lafan_tpose_runtime.reset()
+        if hasattr(self, "lafan_tracking_runtime"):
+            self.lafan_tracking_runtime.reset()
+
+    def update(self):
+        self.state_dict["action"] = self.last_action
+        for update_callback in self.update_callbacks:
+            update_callback(self.state_dict)
+
+    def _warn_throttled(self, attr_name: str, message: str, interval_s: float = 1.0) -> None:
+        now = time.monotonic()
+        last = float(getattr(self, attr_name, 0.0))
+        if now - last >= interval_s:
+            logger.warning(message)
+            setattr(self, attr_name, now)
+
+    def _reset_tracking_state_to_stop(self, reset_realtime_z: bool = False) -> None:
+        self.start_motion = False
+        if hasattr(self, "t_stop"):
+            self.t = self.t_stop
+        if reset_realtime_z and getattr(self, "ctx_source", None) == "zmq":
+            self.ctx_latest = _default_realtime_z(float(self.ctx_norm_ref))
+            if self.ctx_window is not None:
+                self.ctx_window.clear()
+
+    def enter_safe_stop(
+        self,
+        reason: str,
+        *,
+        reset_realtime_z: bool = False,
+        warning_attr: str = "_last_safe_stop_warning",
+    ) -> None:
+        self.use_policy_action = False
+        self.get_ready_state = False
+        self._reset_tracking_state_to_stop(reset_realtime_z=reset_realtime_z)
+        self.last_action = np.zeros_like(self.last_action)
+        self._warn_throttled(warning_attr, f"Safe stop: {reason}")
+
+    def enter_stop_latch(self, reason: str) -> None:
+        self.stop_latched = True
+        self.pico_enable_released_after_stop = False
+        self.stop_latch_enable_released_after_stop = False
+        self.enter_safe_stop(reason)
+
+    def _request_exit(self, signum, _frame) -> None:
+        self._exit_requested = True
+        try:
+            self._exit_signal_name = signal.Signals(signum).name
+        except ValueError:
+            self._exit_signal_name = str(signum)
+
+    def _install_signal_handlers(self) -> None:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(sig, self._request_exit)
+            except (ValueError, RuntimeError):
+                pass
+
+    def _warn_stop_latch_ignored(self, source: str) -> None:
+        self._warn_throttled(
+            "_last_stop_latch_warning",
+            f"{source} ignored while global stop latch is active; release enable/start inputs, then re-arm explicitly.",
+        )
+
+    def _clear_stop_latch_for_rearm(self, source: str) -> None:
+        self.stop_latched = False
+        self.pico_enable_released_after_stop = True
+        self.stop_latch_enable_released_after_stop = True
+        logger.info(f"{source}: global stop latch cleared")
+
+    def _carry_calibration_enabled(self) -> bool:
+        return bool(
+            self.task_type == "carry"
+            and hasattr(self, "carry_runtime")
+            and self.carry_runtime.deployment_calibration_enabled
+        )
+
+    def _write_carry_calibration_result(self) -> None:
+        if not self._carry_calibration_enabled():
+            return
+        recorder = getattr(self, "data_recorder", None)
+        payload = {
+            "schema_version": 1,
+            "saved_at_ns": time.time_ns(),
+            "controller_profile": self.carry_runtime.controller_profile,
+            **self.carry_runtime.deployment_calibration_snapshot(),
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        if recorder is not None:
+            path = recorder.run_dir / "calibration.json"
+            path.write_text(serialized, encoding="utf-8")
+            logger.info(f"Carry deployment calibration saved: {path}")
+        else:
+            logger.warning("Carry calibration completed but no record directory is configured")
+
+        persistent_path = self.carry_runtime.calibration_result_path
+        if persistent_path is not None:
+            persistent_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = persistent_path.with_name(
+                f".{persistent_path.name}.tmp.{os.getpid()}"
+            )
+            try:
+                temporary_path.write_text(serialized, encoding="utf-8")
+                os.replace(temporary_path, persistent_path)
+                self.carry_runtime.saved_calibration_detected = True
+                self.carry_runtime.saved_calibration_source_path = persistent_path
+                logger.info(f"Reusable Carry calibration saved: {persistent_path}")
+            except OSError as exc:
+                logger.error(f"Failed to save reusable Carry calibration: {exc}")
+            finally:
+                temporary_path.unlink(missing_ok=True)
+
+    def _poll_realtime_z(self) -> bool:
+        if getattr(self, "ctx_zmq", None) is None:
+            return False
+
+        import zmq
+
+        received_valid_z = False
+        while True:
+            try:
+                raw = self.ctx_zmq.recv(flags=zmq.NOBLOCK)
+            except zmq.Again:
+                break
+
+            try:
+                z = np.frombuffer(raw, dtype=np.float32) if raw else np.array([], dtype=np.float32)
+            except ValueError:
+                self._warn_throttled(
+                    "_last_invalid_z_warning",
+                    "Ignoring invalid realtime z: malformed float32 payload",
+                )
+                continue
+            if z.size != 256 or not np.all(np.isfinite(z)):
+                self._warn_throttled(
+                    "_last_invalid_z_warning",
+                    f"Ignoring invalid realtime z: size={z.size}, finite={bool(np.all(np.isfinite(z)))}",
+                )
+                continue
+
+            self.ctx_latest = z.copy()
+            self.ctx_last_z_monotonic = time.monotonic()
+            received_valid_z = True
+
+        return received_valid_z
+
+    def _check_realtime_z_watchdog(self) -> None:
+        timeout_s = float(getattr(self, "ctx_zmq_timeout_s", 0.0))
+        if timeout_s <= 0.0:
+            return
+
+        now = time.monotonic()
+        last_z_time = getattr(self, "ctx_last_z_monotonic", None)
+        reference_time = (
+            float(last_z_time)
+            if last_z_time is not None
+            else float(getattr(self, "ctx_zmq_start_monotonic", now))
+        )
+        age_s = now - reference_time
+        if age_s > timeout_s:
+            self.enter_safe_stop(
+                f"no valid realtime z for {age_s * 1000:.0f} ms",
+                reset_realtime_z=True,
+                warning_attr="_last_z_timeout_warning",
+            )
+
+    def _apply_q_target_slew_limit(self, q_target: np.ndarray) -> np.ndarray:
+        q_target = np.asarray(q_target, dtype=np.float64).reshape(-1)
+        if self.q_target_slew_safety_factor == 0.0:
+            return q_target.copy()
+        if self.last_cmd_q is None:
+            baseline = np.asarray(self.state_processor.joint_pos, dtype=np.float64).reshape(-1)
+            if baseline.shape != q_target.shape or not np.all(np.isfinite(baseline)):
+                baseline = q_target.copy()
+        else:
+            baseline = np.asarray(self.last_cmd_q, dtype=np.float64).reshape(-1)
+
+        max_delta = self.joint_velocity_limit * self.rl_dt * self.q_target_slew_safety_factor
+        if max_delta.shape != q_target.shape:
+            raise ValueError(
+                f"q_target slew limit shape mismatch: {max_delta.shape} vs {q_target.shape}"
+            )
+        return baseline + np.clip(q_target - baseline, -max_delta, max_delta)
+
+    def _send_safe_hold_command(self) -> bool:
+        if not bool(getattr(self, "has_valid_low_state", False)):
+            return False
+        if not hasattr(self, "state_processor") or not hasattr(self.state_processor, "joint_pos"):
+            return False
+
+        hold_q = np.asarray(self.state_processor.joint_pos, dtype=np.float64).reshape(-1)
+        if hold_q.shape[0] != self.num_dofs or not np.all(np.isfinite(hold_q)):
+            return False
+
+        hold_q = np.clip(hold_q, self.joint_pos_lower_limit, self.joint_pos_upper_limit)
+        try:
+            self.command_sender.send_command(
+                hold_q,
+                np.zeros(self.num_dofs),
+                np.zeros(self.num_dofs),
+            )
+            self.last_cmd_q = hold_q.copy()
+            return True
+        except Exception as exc:
+            self._warn_throttled(
+                "_last_safe_stop_warning",
+                f"Failed to send safe hold command: {exc}",
+            )
+            return False
+
+    def prepare_obs_for_rl(self):
+        """Prepare observation for policy inference using observation classes"""
+        if self.task_type == "carry":
+            inputs, frame = self.carry_runtime.build_input(self.state_processor, self.last_action)
+            self._record_mocap_frame = frame
+            self._record_carry_phase = str(self.carry_runtime.controller.phase)
+            self._record_carry_mode = str(self.carry_runtime.last_mode)
+            self._record_model_role = str(self.carry_runtime.active_model_role)
+            self._record_carry_metrics = self.carry_runtime.pending_metrics
+            self._record_actor_trace = self.carry_runtime.pending_inference_trace
+            return {"mocap_sequence": np.asarray([frame.sequence], dtype=np.int64)}, inputs
+
+        if self.task_type == "lafan_tpose":
+            inputs = self.lafan_tpose_runtime.build_input(self.state_processor, self.last_action)
+            return {"mocap_sequence": np.asarray([0], dtype=np.int64)}, inputs
+
+        if self.task_type == "lafan_tracking":
+            inputs = self.lafan_tracking_runtime.build_input(
+                self.state_processor, self.last_action
+            )
+            return {
+                "tracking_index": np.asarray(
+                    [self.lafan_tracking_runtime.tracking_index], dtype=np.int64
+                )
+            }, inputs
+
+        obs_dict: Dict[str, np.ndarray] = {}
+        self.update()
+
+        for obs_group in self.observations.values():
+            obs = obs_group.compute()
+            obs_dict[obs_group.name] = obs[None, :].astype(np.float32)
+
+        obs = obs_dict[obs_group.name]
+
+        if self.task_type == "tracking":
+            if getattr(self, "ctx_source", "pkl") == "pkl":
+                window = self.ctx[self.t:self.t + self.window_size]
+                discounts = self.gamma ** np.arange(len(window))
+                discounts = discounts / np.sum(discounts)
+                discounted_avg = np.sum(window * discounts[:, np.newaxis], axis=0)
+                discounted_avg = (
+                    discounted_avg
+                    / (np.linalg.norm(discounted_avg, axis=-1) + 1e-8)
+                    * float(np.linalg.norm(self.ctx[0]))
+                )
+            else:
+                from collections import deque
+
+                self._poll_realtime_z()
+                self._check_realtime_z_watchdog()
+
+                if self.ctx_window.maxlen != int(self.window_size):
+                    old = list(self.ctx_window)
+                    self.ctx_window = deque(old[-int(self.window_size):], maxlen=int(self.window_size))
+
+                self.ctx_window.appendleft(self.ctx_latest)
+                if len(self.ctx_window) > 0:
+                    window = np.stack(list(self.ctx_window), axis=0)
+                else:
+                    window = self.ctx_latest[None, :]
+                discounts = self.gamma ** np.arange(window.shape[0])
+                discounts = discounts / np.sum(discounts)
+                discounted_avg = np.sum(window * discounts[:, np.newaxis], axis=0)
+                discounted_avg = (
+                    discounted_avg
+                    / (np.linalg.norm(discounted_avg) + 1e-8)
+                    * float(self.ctx_norm_ref)
+                )
+
+            inputs = np.concatenate([obs, discounted_avg[np.newaxis, :]], axis=-1).astype(np.float32)
+
+            if self.use_policy_action:
+                if self.start_motion and self.t < self.t_end:
+                    self.t += 1
+                    if getattr(self, "ctx_source", "pkl") == "pkl":
+                        self.t = self.t % self.ctx.shape[0]
+                    if self.t % 100 == 0:
+                        logger.info(f"step={self.t}")
+                else:
+                    self.t = self.t_stop
+                    self.start_motion = False
+        elif self.task_type == "reward":
+            try:
+                inputs = np.concatenate([obs, self.selected_z[self.z_index]], axis=-1).astype(np.float32)
+            except Exception as e:
+                print(f"obs={obs.shape}")
+                print(f"self.selected_z[self.z_index]={self.selected_z[self.z_index].shape}")
+                raise e
+        # new goal reaching code
+        elif self.task_type == "goal":
+            try:
+                inputs = np.concatenate([obs, list(self.z_dict.values())[self.z_index]], axis=-1).astype(np.float32)
+            except Exception as e:
+                print(f"obs={obs.shape}")
+                print(f"list(self.z_dict.values())[self.z_index]]={list(self.z_dict.values())[self.z_index].shape}")
+                raise e
+
+        return obs_dict, inputs
+
+    def get_init_target(self):
+        if self.init_count > 500:
+            self.init_count = 500
+
+        # interpolate from current dof_pos to default angles
+        dof_pos = self.state_processor.joint_pos
+        # Reach the nominal pose over 10 s at 50 Hz, then hold it. Without the
+        # clamp, leaving A/init active longer than 10 s extrapolates beyond the
+        # configured pose and can command an unsafe posture.
+        progress = min(self.init_count / 500, 1.0)
+        q_target = dof_pos + (self.default_dof_angles - dof_pos) * progress
+        self.init_count += 1
+        return q_target
+
+    def _record_control_sample(
+        self,
+        *,
+        status: str,
+        loop_start: float,
+        q_target: np.ndarray | None = None,
+    ) -> None:
+        recorder = self.data_recorder
+        if recorder is None:
+            return
+
+        try:
+            joint_position = np.asarray(self.state_processor.joint_pos).copy()
+            joint_velocity = np.asarray(self.state_processor.joint_vel).copy()
+            joint_tau_est = np.asarray(
+                getattr(
+                    self.state_processor,
+                    "joint_tau_est",
+                    np.full_like(joint_position, np.nan),
+                )
+            ).copy()
+            q_target_array = (
+                None if q_target is None else np.asarray(q_target, dtype=np.float64).copy()
+            )
+            dq_target_array = None
+            tau_feedforward = None
+            kp = None
+            kd = None
+            effort_limit = np.asarray(
+                getattr(self, "joint_effort_limit", np.full_like(joint_position, np.nan)),
+                dtype=np.float64,
+            ).copy()
+            pd_torque_request = None
+            pd_torque_request_limited = None
+            pd_limit_ratio = None
+            pd_limit_exceeded = None
+            tau_est_limit_ratio = np.divide(
+                np.abs(joint_tau_est),
+                effort_limit,
+                out=np.full_like(joint_tau_est, np.nan),
+                where=np.isfinite(effort_limit) & (effort_limit > 0.0),
+            )
+            tau_est_limit_exceeded = (
+                np.isfinite(tau_est_limit_ratio) & (tau_est_limit_ratio >= 1.0)
+            )
+            if q_target_array is not None:
+                dq_target_array = np.zeros_like(q_target_array)
+                tau_feedforward = np.zeros_like(q_target_array)
+                command_indices = self.command_sender.joint_indices_unitree
+                kp = np.asarray(
+                    self.command_sender.joint_kp_unitree[command_indices],
+                    dtype=np.float64,
+                ).copy()
+                kd = np.asarray(
+                    self.command_sender.joint_kd_unitree[command_indices],
+                    dtype=np.float64,
+                ).copy()
+                # This is the nominal PD request implied by LowCmd. tau_est
+                # below remains the independently reported motor-side value.
+                pd_torque_request = (
+                    tau_feedforward
+                    + kp * (q_target_array - joint_position)
+                    + kd * (dq_target_array - joint_velocity)
+                )
+                pd_limit_ratio = np.divide(
+                    np.abs(pd_torque_request),
+                    effort_limit,
+                    out=np.full_like(pd_torque_request, np.nan),
+                    where=np.isfinite(effort_limit) & (effort_limit > 0.0),
+                )
+                pd_limit_exceeded = (
+                    np.isfinite(pd_limit_ratio) & (pd_limit_ratio >= 1.0)
+                )
+                pd_torque_request_limited = np.where(
+                    np.isfinite(effort_limit),
+                    np.clip(pd_torque_request, -effort_limit, effort_limit),
+                    pd_torque_request,
+                )
+
+            frame = getattr(self, "_record_mocap_frame", None)
+            mocap = None
+            if frame is not None:
+                mocap = {
+                    "sequence": int(frame.sequence),
+                    "timestamp_ns": int(frame.timestamp_ns),
+                    "robot_root": {
+                        "position_world_m": np.asarray(frame.robot_root_position).copy(),
+                        "quaternion_wxyz": np.asarray(frame.robot_root_quaternion_wxyz).copy(),
+                        "linear_velocity_world_m_s": (
+                            None
+                            if frame.robot_root_linear_velocity_world is None
+                            else np.asarray(frame.robot_root_linear_velocity_world).copy()
+                        ),
+                        "angular_velocity_world_rad_s": (
+                            None
+                            if frame.robot_root_angular_velocity_world is None
+                            else np.asarray(
+                                frame.robot_root_angular_velocity_world
+                            ).copy()
+                        ),
+                    },
+                    "object": {
+                        "reference_position_world_m": np.asarray(frame.object_position).copy(),
+                        "quaternion_wxyz": np.asarray(frame.object_quaternion_wxyz).copy(),
+                        "linear_velocity_world_m_s": np.asarray(
+                            frame.object_linear_velocity_world
+                        ).copy(),
+                        "angular_velocity_world_rad_s": np.asarray(
+                            frame.object_angular_velocity_world
+                        ).copy(),
+                    },
+                    "hand_contact": np.asarray(frame.hand_contact).copy(),
+                    "hand_rigid_origins": {
+                        "position_world_m": (
+                            None
+                            if frame.hand_rigid_origin_positions_world is None
+                            else np.asarray(
+                                frame.hand_rigid_origin_positions_world
+                            ).copy()
+                        ),
+                        "present": (
+                            None
+                            if frame.hand_rigid_origin_present is None
+                            else np.asarray(frame.hand_rigid_origin_present).copy()
+                        ),
+                        "quality_grade": (
+                            None
+                            if frame.hand_rigid_origin_quality_grade is None
+                            else np.asarray(
+                                frame.hand_rigid_origin_quality_grade
+                            ).copy()
+                        ),
+                    },
+                    "target_position_world_m": np.asarray(
+                        frame.target_position_world
+                    ).copy(),
+                    "object_present": float(frame.object_present),
+                    "task_id": float(frame.task_id),
+                }
+
+            sample = {
+                "schema_version": 1,
+                "host_time_ns": time.time_ns(),
+                "monotonic_time_ns": time.monotonic_ns(),
+                "control_step": int(getattr(self, "total_inference_cnt", 0)),
+                "loop_elapsed_s": float(time.perf_counter() - loop_start),
+                "status": str(status),
+                "control": {
+                    "use_policy_action": bool(self.use_policy_action),
+                    "get_ready_state": bool(self.get_ready_state),
+                    "stop_latched": bool(self.stop_latched),
+                    "read_only": bool(self.read_only),
+                },
+                "joint": {
+                    "low_state_tick": self.state_processor.low_state_tick,
+                    "mode_machine": self.state_processor.low_state_mode_machine,
+                    "received_monotonic_ns": (
+                        self.state_processor.low_state_received_monotonic_ns
+                    ),
+                    "position_rad": joint_position,
+                    "velocity_rad_s": joint_velocity,
+                    "acceleration_rad_s2": np.asarray(
+                        getattr(
+                            self.state_processor,
+                            "joint_acc",
+                            np.full_like(joint_position, np.nan),
+                        )
+                    ).copy(),
+                    "torque_estimate_nm": joint_tau_est,
+                    "temperature_raw": np.asarray(
+                        getattr(
+                            self.state_processor,
+                            "motor_temperature",
+                            np.full((self.num_dofs, 2), -1),
+                        )
+                    ).copy(),
+                    "voltage_v": np.asarray(
+                        getattr(
+                            self.state_processor,
+                            "motor_voltage",
+                            np.full_like(joint_position, np.nan),
+                        )
+                    ).copy(),
+                    "motor_state_code": np.asarray(
+                        getattr(
+                            self.state_processor,
+                            "motor_state_code",
+                            np.zeros(self.num_dofs, dtype=np.uint32),
+                        )
+                    ).copy(),
+                },
+                "imu": {
+                    "quaternion_wxyz": np.asarray(self.state_processor.root_quat_b).copy(),
+                    "angular_velocity_rad_s": np.asarray(
+                        self.state_processor.root_ang_vel_b
+                    ).copy(),
+                },
+                "command": {
+                    "policy_action": np.asarray(self.last_action).copy(),
+                    "q_target_rad": q_target_array,
+                    "dq_target_rad_s": dq_target_array,
+                    "tau_feedforward_nm": tau_feedforward,
+                    "kp_nm_per_rad": kp,
+                    "kd_nm_s_per_rad": kd,
+                    "pd_torque_request_estimate_nm": pd_torque_request,
+                    "pd_torque_request_limited_estimate_nm": pd_torque_request_limited,
+                },
+                "torque_limit_diagnostics": {
+                    "configured_effort_limit_nm": effort_limit,
+                    "pd_request_limit_ratio": pd_limit_ratio,
+                    "pd_request_limit_exceeded": pd_limit_exceeded,
+                    "reported_tau_est_limit_ratio": tau_est_limit_ratio,
+                    "reported_tau_est_limit_exceeded": tau_est_limit_exceeded,
+                    "note": (
+                        "pd_request fields are derived from LowCmd q/dq/tau_ff/kp/kd; "
+                        "torque_estimate_nm is Unitree LowState tau_est"
+                    ),
+                },
+                "policy_trace": {
+                    "actor_output_raw": (
+                        None
+                        if getattr(self, "_record_actor_output_raw", None) is None
+                        else np.asarray(self._record_actor_output_raw).copy()
+                    ),
+                    "actor_output_clipped": (
+                        None
+                        if getattr(self, "_record_actor_output_clipped", None) is None
+                        else np.asarray(self._record_actor_output_clipped).copy()
+                    ),
+                    "actor_input": (
+                        None
+                        if getattr(self, "_record_actor_trace", None) is None
+                        else np.asarray(self._record_actor_trace["actor_input"]).copy()
+                    ),
+                    "state": (
+                        None
+                        if getattr(self, "_record_actor_trace", None) is None
+                        else np.asarray(self._record_actor_trace["state"]).copy()
+                    ),
+                    "last_action": (
+                        None
+                        if getattr(self, "_record_actor_trace", None) is None
+                        else np.asarray(self._record_actor_trace["last_action"]).copy()
+                    ),
+                    "history_actor": (
+                        None
+                        if getattr(self, "_record_actor_trace", None) is None
+                        else np.asarray(self._record_actor_trace["history_actor"]).copy()
+                    ),
+                    "privileged_state": (
+                        None
+                        if getattr(self, "_record_actor_trace", None) is None
+                        or self._record_actor_trace["privileged_state"] is None
+                        else np.asarray(
+                            self._record_actor_trace["privileged_state"]
+                        ).copy()
+                    ),
+                    "latent": (
+                        None
+                        if getattr(self, "_record_actor_trace", None) is None
+                        else np.asarray(self._record_actor_trace["latent"]).copy()
+                    ),
+                },
+                "carry": {
+                    "phase": getattr(self, "_record_carry_phase", None),
+                    "mode": getattr(self, "_record_carry_mode", None),
+                    "model_role": getattr(self, "_record_model_role", None),
+                    "metrics": getattr(self, "_record_carry_metrics", None),
+                    "mocap": mocap,
+                    "deployment_calibration": (
+                        self.carry_runtime.deployment_calibration_snapshot()
+                        if self._carry_calibration_enabled()
+                        else None
+                    ),
+                },
+                "lafan_tracking": (
+                    {
+                        "motion_id": self.lafan_tracking_runtime.motion_id,
+                        "motion_name": self.lafan_tracking_runtime.motion_name,
+                        "tracking_index": self.lafan_tracking_runtime.tracking_index,
+                        "start_motion": bool(self.start_motion),
+                        "completed": bool(self.lafan_tracking_runtime.completed),
+                    }
+                    if self.task_type == "lafan_tracking"
+                    else None
+                ),
+            }
+            if not recorder.record(sample):
+                detail = recorder.writer_error or "writer queue is full"
+                self._warn_throttled(
+                    "_last_recorder_warning",
+                    f"Carry data recorder dropped a sample: {detail}",
+                    interval_s=5.0,
+                )
+        except Exception as exc:
+            self._warn_throttled(
+                "_last_recorder_warning",
+                f"Carry data recorder snapshot failed: {exc}",
+                interval_s=5.0,
+            )
+
+    def run(self):
+        self._install_signal_handlers()
+        self._exit_requested = False
+        self._exit_signal_name = None
+        total_inference_cnt = 0
+        state_dict = {}
+        state_dict["action"] = np.zeros(self.num_actions)
+        self.state_dict = state_dict
+        self.total_inference_cnt = total_inference_cnt
+        self.perf_dict = {}
+
+        try:
+            scheduler = sched.scheduler(time.perf_counter, time.sleep)
+            next_run_time = time.perf_counter()
+
+            while not self._exit_requested:
+                scheduler.enterabs(next_run_time, 1, self._rl_step_scheduled, ())
+                scheduler.run()
+
+                next_run_time += self.rl_dt
+                self.total_inference_cnt += 1
+
+                if self.total_inference_cnt % 100 == 0:
+                    self.perf_dict = {}
+            if self._exit_requested:
+                logger.info(f"{self._exit_signal_name or 'signal'} received, exiting policy loop.")
+        except KeyboardInterrupt:
+            logger.info("KeyboardInterrupt, exiting policy loop.")
+        finally:
+            self.enter_safe_stop("policy loop exiting")
+            self._send_safe_hold_command()
+            close_robot = getattr(getattr(self, "robot", None), "close", None)
+            if callable(close_robot):
+                close_robot()
+            if self.data_recorder is not None:
+                self.data_recorder.close()
+                logger.info(
+                    "Local policy data saved: {} (samples={}, dropped={})".format(
+                        self.data_recorder.run_dir,
+                        self.data_recorder.sample_count,
+                        self.data_recorder.dropped_count,
+                    )
+                )
+
+    def _rl_step_scheduled(self):
+        loop_start = time.perf_counter()
+        self._record_mocap_frame = None
+        self._record_carry_metrics = None
+        self._record_carry_phase = (
+            str(self.carry_runtime.controller.phase) if self.task_type == "carry" else None
+        )
+        self._record_carry_mode = None
+        self._record_actor_trace = None
+        self._record_actor_output_raw = None
+        self._record_actor_output_clipped = None
+        self._record_model_role = (
+            str(self.carry_runtime.active_model_role) if self.task_type == "carry" else None
+        )
+
+        with Timer(self.perf_dict, "prepare_low_state"):
+            wireless_r2_stop = False
+            if self.use_joystick:
+                # print(f"Debug::process_joystick:")
+                wireless_r2_stop = self.process_joystick_input()
+            if self.pico_control_enabled and not wireless_r2_stop:
+                self.process_pico_control_input()
+
+            if not self.state_processor._prepare_low_state():
+                print("low state not ready.")
+                return
+            self.has_valid_low_state = True
+
+        calibration_running = bool(
+            self._carry_calibration_enabled()
+            and not self.carry_runtime.deployment_calibration_complete
+        )
+        if calibration_running:
+            pending_contact_label = self.carry_runtime.calibration_contact_label
+            try:
+                _, calibration_frame = self.carry_runtime.build_input(
+                    self.state_processor, self.last_action
+                )
+                self._record_actor_trace = self.carry_runtime.pending_inference_trace
+                self._record_mocap_frame = calibration_frame
+                self._record_carry_phase = str(self.carry_runtime.controller.phase)
+                self._record_carry_mode = "deployment_calibration"
+                self._record_model_role = str(self.carry_runtime.active_model_role)
+                self._record_carry_metrics = self.carry_runtime.pending_metrics
+                if self.carry_runtime.pending_metrics is not None:
+                    self.carry_runtime.observe_deployment_calibration(
+                        calibration_frame,
+                        self.carry_runtime.pending_metrics,
+                        self.state_processor.joint_pos,
+                        self.default_dof_angles,
+                        default_pose_active=bool(self.get_ready_state),
+                    )
+                    if pending_contact_label is not None:
+                        counts = self.carry_runtime.deployment_calibration_snapshot()[
+                            "sample_counts"
+                        ]["contact"]
+                        logger.info(
+                            "Carry calibration captured one {} frame: "
+                            "left(no/contact)={}/{} right(no/contact)={}/{} "
+                            "source={}/{}".format(
+                                "CONTACT" if pending_contact_label else "NO_CONTACT",
+                                counts["left"]["no_contact"],
+                                counts["left"]["contact"],
+                                counts["right"]["no_contact"],
+                                counts["right"]["contact"],
+                                self.carry_runtime.contact_estimator.last_geometry_source[0],
+                                self.carry_runtime.contact_estimator.last_geometry_source[1],
+                            )
+                        )
+                    capture_result = (
+                        self.carry_runtime.maybe_finalize_deployment_calibration_capture(
+                            default_pose_active=bool(self.get_ready_state)
+                        )
+                    )
+                    if capture_result is not None:
+                        accepted, message = capture_result
+                        (logger.info if accepted else logger.warning)(
+                            f"Carry calibration automatic capture: {message}"
+                        )
+                        # A B press only starts the timed capture.  The final
+                        # valid frame is consumed here on a later control
+                        # cycle, so this is the point at which a completed
+                        # calibration must be persisted for L1+R1 reuse.
+                        if (
+                            accepted
+                            and self.carry_runtime.deployment_calibration_complete
+                        ):
+                            self._write_carry_calibration_result()
+                self.carry_runtime.pending_metrics = None
+                if self.total_inference_cnt % 100 == 0:
+                    snapshot = self.carry_runtime.deployment_calibration_snapshot()
+                    counts = snapshot["sample_counts"]
+                    stage = str(snapshot["stage"])
+                    capture_active = bool(snapshot["capture_active"])
+                    status_parts = [
+                        f"stage={stage}", f"capture={int(capture_active)}"
+                    ]
+                    if stage == "pelvis":
+                        joint_error = self.carry_runtime.support_pose_joint_error(
+                            self.state_processor.joint_pos,
+                            self.default_dof_angles,
+                        )
+                        joint_limit = float(
+                            self.carry_runtime.calibration_cfg.max_default_joint_error
+                        )
+                        root_quat = np.asarray(
+                            calibration_frame.robot_root_quaternion_wxyz,
+                            dtype=np.float64,
+                        )
+                        upright = float(
+                            1.0 - 2.0 * (root_quat[1] ** 2 + root_quat[2] ** 2)
+                        )
+                        if self._record_carry_metrics is not None:
+                            upright = float(self._record_carry_metrics["pelvis_up_z"])
+                        upright_limit = float(
+                            self.carry_runtime.calibration_cfg.min_pelvis_upright
+                        )
+                        if not self.get_ready_state:
+                            blocker = "press_A_for_default_pose"
+                        elif joint_error > joint_limit:
+                            blocker = "default_joint_error"
+                        elif upright < upright_limit:
+                            blocker = "pelvis_not_upright"
+                        elif not capture_active:
+                            blocker = "press_B_to_capture"
+                        else:
+                            blocker = "none"
+                        status_parts.extend(
+                            (
+                                f"samples={counts['pelvis']}/"
+                                f"{self.carry_runtime.calibration_cfg.min_pelvis_samples}",
+                                f"ready={int(bool(self.get_ready_state))}",
+                                f"leg_waist_error={joint_error:.3f}/{joint_limit:.3f}rad",
+                                f"up_z={upright:.3f}/{upright_limit:.3f}",
+                                f"blocker={blocker}",
+                            )
+                        )
+                    elif stage == "box_height":
+                        blocker = (
+                            "press_A_for_default_pose"
+                            if not self.get_ready_state
+                            else "press_B_to_capture"
+                            if not capture_active
+                            else "none"
+                        )
+                        status_parts.extend(
+                            (
+                                f"samples={counts['box_height']}/"
+                                f"{self.carry_runtime.calibration_cfg.min_box_height_samples}",
+                                f"ready={int(bool(self.get_ready_state))}",
+                                f"blocker={blocker}",
+                            )
+                        )
+                    elif stage == "contact":
+                        contact_counts = counts["contact"]
+                        status_parts.extend(
+                            (
+                                "left(no/contact)="
+                                f"{contact_counts['left']['no_contact']}/"
+                                f"{contact_counts['left']['contact']}",
+                                "right(no/contact)="
+                                f"{contact_counts['right']['no_contact']}/"
+                                f"{contact_counts['right']['contact']}",
+                                "X/Y=one-shot",
+                            )
+                        )
+                    logger.info("Carry calibration: " + " ".join(status_parts))
+            except Exception as exc:
+                self.carry_runtime.pending_metrics = None
+                # A one-shot X/Y event belongs only to the current instant. Do
+                # not retain it across a stale/rejected LuMo frame.
+                self.carry_runtime.clear_calibration_contact_label()
+                self._warn_throttled(
+                    "_last_calibration_warning",
+                    "Carry calibration waiting for valid data{}: {}".format(
+                        "; one-shot X/Y annotation discarded"
+                        if pending_contact_label is not None
+                        else "",
+                        exc,
+                    ),
+                    interval_s=1.0,
+                )
+
+        skip_policy_inference = calibration_running or (
+            self.task_type in {"carry", "lafan_tpose", "lafan_tracking"}
+            and (self.get_ready_state or not self.use_policy_action)
+        )
+        try:
+            if skip_policy_inference:
+                action_scaled = np.zeros((1, self.num_actions), dtype=np.float32)
+            else:
+                with Timer(self.perf_dict, "prepare_obs"):
+                    # Prepare observations
+                    obs_dict, observations = self.prepare_obs_for_rl()
+                    self.state_dict["is_init"] = np.zeros(1, dtype=bool)
+
+                with Timer(self.perf_dict, "policy"):
+                    # Inference
+                    active_policy = self.policy
+                    if (
+                        self.task_type == "carry"
+                        and self.carry_runtime.active_model_role == "approach"
+                    ):
+                        if self.carry_approach_policy is None:
+                            raise RuntimeError(
+                                "Carry controller selected the approach model, but no "
+                                "approach ONNX policy is loaded"
+                            )
+                        active_policy = self.carry_approach_policy
+                    actor_output_raw = np.asarray(
+                        active_policy(observations), dtype=np.float32
+                    )
+                    self._record_actor_output_raw = actor_output_raw.reshape(-1).copy()
+                    if not np.all(np.isfinite(actor_output_raw)):
+                        self.enter_safe_stop("non-finite policy action")
+                        self.state_dict["action"] = np.zeros(self.num_actions)
+                        self._send_safe_hold_command()
+                        self._record_control_sample(
+                            status="non_finite_policy_action", loop_start=loop_start
+                        )
+                        return
+                    # Clip policy action
+                    actor_output_clipped = actor_output_raw.clip(-1, 1)
+                    self._record_actor_output_clipped = (
+                        actor_output_clipped.reshape(-1).copy()
+                    )
+                    action_scaled = self.action_rescale * actor_output_clipped
+                    self.last_action = action_scaled.reshape(-1)
+        except Exception as e:
+            print(f"Error in policy inference: {e}")
+            self.enter_safe_stop(f"policy inference failed: {e}")
+            self.state_dict["action"] = np.zeros(self.num_actions)
+            self._send_safe_hold_command()
+            self._record_control_sample(
+                status="policy_inference_failed", loop_start=loop_start
+            )
+            return
+
+        with Timer(self.perf_dict, "rule_based_control_flow"):
+            # rule based control flow
+            if self.get_ready_state:
+                q_target = self.get_init_target()
+            elif calibration_running or not self.use_policy_action:
+                q_target = self.state_processor.joint_pos
+            else:
+                policy_action = np.zeros((self.num_dofs))
+                policy_action[self.controlled_joint_indices] = action_scaled
+                policy_action = policy_action * self.action_scale
+                q_target = policy_action + self.default_dof_angles
+
+            # Clip q target
+            # print(self.joint_pos_lower_limit)
+            q_target = np.clip(
+                q_target, self.joint_pos_lower_limit, self.joint_pos_upper_limit
+            )
+            if not np.all(np.isfinite(q_target)):
+                self.enter_safe_stop("non-finite q_target before slew limit")
+                self._send_safe_hold_command()
+                self._record_control_sample(
+                    status="non_finite_q_target_before_slew", loop_start=loop_start
+                )
+                return
+
+            q_target = self._apply_q_target_slew_limit(q_target)
+            q_target = np.clip(
+                q_target, self.joint_pos_lower_limit, self.joint_pos_upper_limit
+            )
+            if not np.all(np.isfinite(q_target)):
+                self.enter_safe_stop("non-finite q_target after slew limit")
+                self._send_safe_hold_command()
+                self._record_control_sample(
+                    status="non_finite_q_target_after_slew", loop_start=loop_start
+                )
+                return
+
+            # Send command
+            cmd_q = q_target
+            cmd_dq = np.zeros(self.num_dofs)
+            cmd_tau = np.zeros(self.num_dofs)
+            self.command_sender.send_command(cmd_q, cmd_dq, cmd_tau)
+            self.last_cmd_q = np.asarray(cmd_q, dtype=np.float64).copy()
+            if self.task_type == "carry" and self.use_policy_action and not skip_policy_inference:
+                self.carry_runtime.advance()
+            elif self.task_type == "lafan_tpose" and self.use_policy_action and not skip_policy_inference:
+                self.lafan_tpose_runtime.advance()
+            elif (
+                self.task_type == "lafan_tracking"
+                and self.use_policy_action
+                and self.start_motion
+                and not skip_policy_inference
+            ):
+                complete = self.lafan_tracking_runtime.advance()
+                if complete:
+                    self.start_motion = False
+                    logger.info(
+                        "LAFAN tracking sequence complete; switched back to the "
+                        "checkpoint-matched T-pose latent"
+                    )
+
+        elapsed = time.perf_counter() - loop_start
+        if calibration_running:
+            record_status = f"calibration_{self.carry_runtime.calibration_stage}"
+        elif skip_policy_inference:
+            record_status = "get_ready" if self.get_ready_state else "policy_disabled"
+        else:
+            record_status = "policy_active"
+        self._record_control_sample(
+            status=record_status,
+            loop_start=loop_start,
+            q_target=cmd_q,
+        )
+        if elapsed > self.rl_dt:
+            logger.warning(f"RL step took {elapsed:.6f} seconds, expected {self.rl_dt} seconds")
+
+
+    def setup_pico_control(self):
+        """Subscribe to Pico controller button JSON from the onboard teleop server."""
+        try:
+            import zmq
+        except ImportError as exc:
+            logger.warning(f"Pico control disabled because pyzmq is unavailable: {exc}")
+            self.pico_control_enabled = False
+            return
+
+        ctx = zmq.Context.instance()
+        sock = ctx.socket(zmq.SUB)
+        sock.setsockopt(zmq.SUBSCRIBE, b"")
+        sock.setsockopt(zmq.CONFLATE, 1)
+        sock.setsockopt(zmq.RCVTIMEO, 0)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(self.pico_control_addr)
+        self.pico_control_sock = sock
+        logger.info(f"Pico policy control enabled: {self.pico_control_addr}")
+        logger.info("Pico controls: A=init, A+B=enable policy/start tracking, B=stop, X=reset")
+
+    def process_pico_control_input(self):
+        if self.pico_control_sock is None:
+            return
+
+        try:
+            import zmq
+        except ImportError:
+            return
+
+        latest_buttons = None
+        while True:
+            try:
+                raw = self.pico_control_sock.recv_string(flags=zmq.NOBLOCK)
+            except zmq.Again:
+                break
+            except Exception as exc:
+                logger.debug(f"Pico control receive failed: {exc}")
+                return
+
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+            buttons = payload.get("controller_buttons") if isinstance(payload, dict) else None
+            if isinstance(buttons, dict):
+                latest_buttons = {str(k): bool(v) for k, v in buttons.items()}
+
+        if latest_buttons is None:
+            return
+
+        self.handle_pico_buttons(latest_buttons)
+
+    def handle_pico_buttons(self, buttons: Dict[str, bool]):
+        prev = self.last_pico_buttons
+        a = bool(buttons.get("right_key_one", False))
+        b = bool(buttons.get("right_key_two", False))
+        x = bool(buttons.get("left_key_one", False))
+
+        prev_a = bool(prev.get("right_key_one", False))
+        prev_b = bool(prev.get("right_key_two", False))
+        prev_x = bool(prev.get("left_key_one", False))
+
+        combo = a and b
+        prev_combo = prev_a and prev_b
+        if self.stop_latched and not a and not b:
+            self.pico_enable_released_after_stop = True
+            self.stop_latch_enable_released_after_stop = True
+
+        if combo and not prev_combo:
+            if self.stop_latched:
+                if not self.stop_latch_enable_released_after_stop:
+                    self._warn_stop_latch_ignored("Pico A+B")
+                    self.last_pico_buttons = buttons
+                    return
+                self._clear_stop_latch_for_rearm("Pico A+B")
+                if self._carry_calibration_enabled():
+                    logger.info(
+                        "Carry re-armed but remains disabled; resume calibration or "
+                        "press A for default pose, then R1 after calibration"
+                    )
+                    self.last_pico_buttons = buttons
+                    return
+                if self.task_type == "lafan_tracking":
+                    logger.info(
+                        "LAFAN tracking re-armed but remains disabled; press A, "
+                        "then use the normal enable/start controls"
+                    )
+                    self.last_pico_buttons = buttons
+                    return
+            logger.info("Pico A+B: enable policy and start tracking")
+            self.handle_joystick_button("R1")
+            self.handle_joystick_button("B")
+        elif a and not prev_a and not b:
+            logger.info("Pico A: init")
+            self.handle_joystick_button("A")
+        elif b and not prev_b and not a:
+            logger.info("Pico B: stop policy")
+            self.handle_joystick_button("R2")
+        elif x and not prev_x:
+            logger.info("Pico X: reset")
+            self.handle_joystick_button("X")
+
+        self.last_pico_buttons = buttons
+
+
+    def process_joystick_input(self):
+        """Poll current wireless controller state and translate to high-level key events."""
+        try:
+            self.wc_msg = self.robot.read_wireless_controller()
+        except Exception:
+            return False
+
+        if self.wc_msg is None:
+            return False
+
+        r2_stop_pressed = bool(self.wc_msg.R2)
+        if r2_stop_pressed:
+            self.enter_stop_latch("G1 wireless R2 stop")
+            self.last_wc_msg = self.wc_msg
+            return True
+
+        if self.stop_latched:
+            enable_or_start_pressed = bool(self.wc_msg.R1 or self.wc_msg.B)
+            if not enable_or_start_pressed:
+                self.stop_latch_enable_released_after_stop = True
+
+            combo = bool(self.wc_msg.R1 and self.wc_msg.B)
+            prev_combo = bool(self.last_wc_msg.R1 and self.last_wc_msg.B)
+            if combo and not prev_combo:
+                if self.stop_latch_enable_released_after_stop:
+                    self._clear_stop_latch_for_rearm("Wireless R1+B")
+                    if self._carry_calibration_enabled():
+                        logger.info(
+                            "Carry re-armed but remains disabled; resume calibration or "
+                            "press A for default pose, then R1 after calibration"
+                        )
+                    elif self.task_type == "lafan_tracking":
+                        logger.info(
+                            "LAFAN tracking re-armed but remains disabled; press R1 "
+                            "for T-pose, then B"
+                        )
+                    else:
+                        self.handle_joystick_button("R1")
+                        self.handle_joystick_button("B")
+                else:
+                    self._warn_stop_latch_ignored("Wireless R1+B")
+                self.last_wc_msg = self.wc_msg
+                return False
+
+            if (
+                (self.wc_msg.R1 and not self.last_wc_msg.R1)
+                or (self.wc_msg.B and not self.last_wc_msg.B)
+            ):
+                self._warn_stop_latch_ignored("Wireless enable/start")
+                self.last_wc_msg = self.wc_msg
+                return False
+
+        reuse_calibration_combo = bool(self.wc_msg.L1 and self.wc_msg.R1)
+        previous_reuse_combo = bool(self.last_wc_msg.L1 and self.last_wc_msg.R1)
+        if (
+            self._carry_calibration_enabled()
+            and reuse_calibration_combo
+            and not previous_reuse_combo
+        ):
+            self.handle_joystick_button("L1+R1")
+            self.last_wc_msg = self.wc_msg
+            return False
+
+        # print(f"wc_msg.A: {self.wc_msg.A}")
+        if self.wc_msg.A and not self.last_wc_msg.A:
+            self.handle_joystick_button("A")
+        if self.wc_msg.B and not self.last_wc_msg.B:
+            self.handle_joystick_button("B")
+        if self.wc_msg.X and not self.last_wc_msg.X:
+            self.handle_joystick_button("X")
+        if self.wc_msg.Y and not self.last_wc_msg.Y:
+            self.handle_joystick_button("Y")
+        if self.wc_msg.L1 and not self.last_wc_msg.L1:
+            self.handle_joystick_button("L1")
+        if self.wc_msg.L2 and not self.last_wc_msg.L2:
+            self.handle_joystick_button("L2")
+        if self.wc_msg.R1 and not self.last_wc_msg.R1:
+            self.handle_joystick_button("R1")
+
+        self.last_wc_msg = self.wc_msg
+        return False
+
+
+    def handle_joystick_button(self, cur_key):
+        if cur_key == "L1+R1":
+            if self.stop_latched:
+                self._warn_stop_latch_ignored("L1+R1 saved-calibration start")
+                return
+            if not self._carry_calibration_enabled():
+                logger.warning("L1+R1 saved-calibration start is available only for Carry")
+                return
+            if self.use_policy_action:
+                logger.warning("L1+R1 ignored: Carry policy is already active")
+                return
+            if not self.carry_runtime.deployment_calibration_complete:
+                accepted, message = (
+                    self.carry_runtime.activate_saved_deployment_calibration()
+                )
+                (logger.warning if not accepted else logger.info)(
+                    f"Carry saved calibration: {message}"
+                )
+                if not accepted:
+                    return
+            else:
+                logger.info(
+                    "Carry calibration is already complete in this process; starting policy"
+                )
+            # The saved-calibration combination is also the explicit opt-in for
+            # non-default-pose starts (for example, suspended fallen-recovery
+            # tests). Route through the normal R1 startup path without imposing
+            # its separate A/default-pose arming requirement.
+            self.get_ready_state = True
+            logger.warning(
+                "L1+R1 saved-calibration start bypassing A/default-pose arming; "
+                "fall recovery will engage after the configured fall debounce"
+            )
+            self.handle_joystick_button("R1")
+            return
+
+        if cur_key == "R1":
+            if self.stop_latched:
+                self._warn_stop_latch_ignored("R1 enable")
+                return
+            if self._carry_calibration_enabled():
+                if not self.carry_runtime.deployment_calibration_complete:
+                    logger.warning(
+                        "R1 ignored: Carry deployment calibration is incomplete "
+                        f"(stage={self.carry_runtime.calibration_stage})"
+                    )
+                    return
+                if not self.get_ready_state:
+                    logger.warning("R1 ignored: press A to arm Carry first")
+                    return
+            logger.info("Using policy actions")
+            self.use_policy_action = True
+            self.get_ready_state = False
+            if self.task_type == "carry":
+                self.carry_runtime.reset()
+                if self.carry_runtime.runtime_mode == "tracking":
+                    logger.info("Carry tracking armed from latent index 0 (current standing pose is retained)")
+                else:
+                    logger.info("Carry controller armed from approach phase")
+            if self.task_type == "lafan_tpose":
+                self.lafan_tpose_runtime.reset()
+                logger.info("LAFAN T-pose body-only policy armed")
+            if self.task_type == "lafan_tracking":
+                self.lafan_tracking_runtime.reset()
+                self.start_motion = False
+                logger.info(
+                    "LAFAN tracking policy armed in checkpoint-matched T-pose; "
+                    "press B to start timeline"
+                )
+            if self.task_type == "reward":
+                total_z = self.num_selected_z
+                logger.info(colored(f"Switch to reward={self.selected_z_names[self.z_index]} (Count: {self.z_index+1}/{total_z})", "blue"))
+            if self.task_type == "goal":
+                logger.info(colored(f"Switch to goal={list(self.z_dict.keys())[self.z_index]} (Count: {self.z_index+1}/{len(self.z_dict)})", "blue"))
+            if self.task_type == "tracking":
+                self.t = self.t_stop
+
+        elif cur_key == "R2":
+            self.enter_stop_latch("R2 stop command")
+            logger.info(colored("Actions set to zero", "blue"))
+        elif cur_key == "A":
+            if self.stop_latched:
+                self._warn_stop_latch_ignored("A init")
+                return
+            if self._carry_calibration_enabled() and not self.use_policy_action:
+                self.get_ready_state = not self.get_ready_state
+                self.carry_runtime.clear_calibration_contact_label()
+                if self.get_ready_state:
+                    self.init_count = 0
+                    logger.info(
+                        "Carry calibration A: default pose enabled; contact label cleared"
+                    )
+                else:
+                    logger.warning(
+                        "Carry calibration A: default pose released; current joint "
+                        "positions are followed with damping for suspended manual motion"
+                    )
+                return
+            self.get_ready_state = True
+            self.init_count = 0
+            logger.info(colored("Setting to init state (do this when robot was in a bad shape)", "blue"))
+        elif cur_key == "B":
+            if self.stop_latched:
+                self._warn_stop_latch_ignored("B start")
+                return
+            if (
+                self._carry_calibration_enabled()
+                and not self.carry_runtime.deployment_calibration_complete
+            ):
+                if self.carry_runtime.calibration_stage in {"pelvis", "box_height"}:
+                    accepted, message = (
+                        self.carry_runtime.start_deployment_calibration_capture(
+                            default_pose_active=bool(self.get_ready_state)
+                        )
+                    )
+                else:
+                    accepted, message = self.carry_runtime.advance_deployment_calibration(
+                        default_pose_active=bool(self.get_ready_state)
+                    )
+                (logger.info if accepted else logger.warning)(
+                    f"Carry calibration B: {message}"
+                )
+                if accepted and self.carry_runtime.deployment_calibration_complete:
+                    self._write_carry_calibration_result()
+                return
+            if self.task_type == "tracking":
+                logger.info("Starting motion")
+                self.start_motion = True
+                self.t = self.t_start
+            elif self.task_type == "lafan_tracking":
+                if not self.use_policy_action:
+                    logger.warning("LAFAN tracking start ignored; press R1 before B")
+                    return
+                self.lafan_tracking_runtime.start()
+                self.start_motion = True
+                logger.info(
+                    "Starting LAFAN motion_id={} name={} from latent row {}".format(
+                        self.lafan_tracking_runtime.motion_id,
+                        self.lafan_tracking_runtime.motion_name,
+                        self.lafan_tracking_runtime.start_index,
+                    )
+                )
+            else:
+                logger.info(colored(f"Commmand [ is undefined in current task type {self.task_type}!", "red"))
+                pass
+        elif cur_key == "X":
+            if (
+                self._carry_calibration_enabled()
+                and not self.carry_runtime.deployment_calibration_complete
+            ):
+                if self.get_ready_state:
+                    logger.warning(
+                        "Carry calibration X ignored: press A to release default pose first"
+                    )
+                    return
+                accepted, message = self.carry_runtime.set_calibration_contact_label(False)
+                (logger.info if accepted else logger.warning)(f"Carry calibration X: {message}")
+                return
+            self.z_index = 0
+            self.start_motion = False
+            if self.task_type == "carry":
+                self.carry_runtime.reset()
+                if self.carry_runtime.runtime_mode == "tracking":
+                    self.use_policy_action = False
+                    logger.info("Carry tracking timeline reset and policy disabled; press R1 to restart")
+            if self.task_type == "lafan_tpose":
+                self.lafan_tpose_runtime.reset()
+            if self.task_type == "lafan_tracking":
+                self.lafan_tracking_runtime.reset()
+                self.use_policy_action = False
+                logger.info(
+                    "LAFAN tracking timeline reset and policy disabled; press R1 for "
+                    "T-pose, then B"
+                )
+            if self.task_type == "tracking":
+                self.t = self.t_stop
+            logger.info("Resetting to stop state")
+        elif cur_key == "Y":
+            if (
+                self._carry_calibration_enabled()
+                and not self.carry_runtime.deployment_calibration_complete
+            ):
+                if self.get_ready_state:
+                    logger.warning(
+                        "Carry calibration Y ignored: press A to release default pose first"
+                    )
+                    return
+                accepted, message = self.carry_runtime.set_calibration_contact_label(True)
+                (logger.info if accepted else logger.warning)(f"Carry calibration Y: {message}")
+                return
+            if self.task_type == "reward":
+                if self.z_index >= self.num_selected_z - 1:
+                    self.z_index = 0
+                else:
+                    self.z_index += 1
+                total_z = self.num_selected_z if self.task_type.startswith("reward-multiple-z-selection-duplicate") else self.num_selected_rewards
+                logger.info(colored(f"Switch to reward={self.selected_z_names[self.z_index]} (Count: {self.z_index+1}/{total_z})", "blue"))
+            elif self.task_type == "goal":
+                if self.z_index >= self.num_selected_goals - 1:
+                    self.z_index = 0
+                else:
+                    self.z_index += 1
+                logger.info(colored(f"Switch to goal {list(self.z_dict.keys())[self.z_index]} ({self.z_index+1}/{self.num_selected_goals})", "blue"))
+
+        # Debug print for kp level tuning
+        if cur_key in ["Y+left", "Y+right", "A+left", "A+right"]:
+            logger.info(colored(f"Debug kp level: {self.command_sender.kp_level}", "green"))
+
+    # ----------------------------- Keyboard handling -----------------------------
+    def _warn_unsupported_keyboard_key(self, keycode: str) -> None:
+        logger.warning(f"Keyboard key '{keycode}' is not supported by this release runtime")
+
+    def _set_debug_kp_level(self, *, delta: float | None = None, value: float | None = None) -> None:
+        if value is None:
+            value = self.command_sender.kp_level + float(delta or 0.0)
+        value = max(0.0, float(value))
+        self.command_sender.kp_level = value
+        logger.info(colored(f"Debug kp level: {self.command_sender.kp_level}", "green"))
+        logger.info(
+            colored(
+                f"Debug kp: {np.array2string(self.command_sender.joint_kp_unitree, precision=4)}",
+                "green",
+            )
+        )
+
+    def start_key_listener(self):
+        """Start a key listener using sshkeyboard (same as BasePolicy)."""
+
+        def on_press(keycode):
+            try:
+                self.handle_keyboard_button(keycode)
+            except Exception as e:
+                logger.warning(f"Keyboard key {keycode}. Error: {e}")
+
+        listener = listen_keyboard(on_press=on_press)
+        listener.start()
+        listener.join()
+
+    def handle_keyboard_button(self, keycode):
+        if keycode == "]":
+            if self.stop_latched:
+                self._warn_stop_latch_ignored("Keyboard ] enable")
+                return
+            logger.info("Using policy actions")
+            self.use_policy_action = True
+            self.get_ready_state = False
+            if self.task_type == "reward":
+                total_z = self.num_selected_z
+                logger.info(colored(f"Switch to reward={self.selected_z_names[self.z_index]} (Count: {self.z_index+1}/{total_z})", "blue"))
+            if self.task_type == "goal":
+                logger.info(colored(f"Switch to goal={list(self.z_dict.keys())[self.z_index]} (Count: {self.z_index+1}/{len(self.z_dict)})", "blue"))
+            if self.task_type == "tracking":
+                self.t = self.t_stop
+            if self.task_type == "lafan_tracking":
+                self.lafan_tracking_runtime.reset()
+                self.start_motion = False
+                logger.info("LAFAN tracking armed in T-pose; press [ to start")
+        elif keycode == "[":
+            if self.stop_latched:
+                self._warn_stop_latch_ignored("Keyboard [ start")
+                return
+            if self.task_type == "tracking":
+                logger.info("Starting motion")
+                self.start_motion = True
+                self.t = self.t_start
+            elif self.task_type == "lafan_tracking":
+                if not self.use_policy_action:
+                    logger.warning("LAFAN tracking start ignored; press ] before [")
+                    return
+                self.lafan_tracking_runtime.start()
+                self.start_motion = True
+                logger.info("Starting LAFAN tracking timeline")
+            else:
+                logger.info(colored(f"Commmand [ is undefined in current task type {self.task_type}!", "red"))
+                pass
+        elif keycode == "n":
+            if self.task_type == "reward":
+                if self.z_index >= self.num_selected_z - 1:
+                    self.z_index = 0
+                else:
+                    self.z_index += 1
+                total_z = self.num_selected_z if self.task_type.startswith("reward-multiple-z-selection-duplicate") else self.num_selected_rewards
+                logger.info(colored(f"Switch to reward={self.selected_z_names[self.z_index]} (Count: {self.z_index+1}/{total_z})", "blue"))
+            elif self.task_type == "goal":
+                if self.z_index >= self.num_selected_goals - 1:
+                    self.z_index = 0
+                else:
+                    self.z_index += 1
+                logger.info(colored(f"Switch to goal {list(self.z_dict.keys())[self.z_index]} ({self.z_index+1}/{self.num_selected_goals})", "blue"))
+        elif keycode == "p":
+            self.z_index = 0
+            self.start_motion = False
+            if self.task_type == "tracking":
+                self.t = self.t_stop
+            if self.task_type == "lafan_tracking":
+                self.lafan_tracking_runtime.reset()
+                self.use_policy_action = False
+            logger.info("Resetting to stop state")
+        elif keycode == "o":
+            self.use_policy_action = False
+            self.get_ready_state = False
+            logger.info("Actions set to zero")
+        elif keycode == "i":
+            self.get_ready_state = True
+            self.init_count = 0
+            logger.info("Setting to init state")
+        elif keycode in {"w", "s", "a", "d", "q", "e", "z"}:
+            self._warn_unsupported_keyboard_key(keycode)
+        elif keycode == "5":
+            self._set_debug_kp_level(delta=-0.01)
+        elif keycode == "6":
+            self._set_debug_kp_level(delta=0.01)
+        elif keycode == "4":
+            self._set_debug_kp_level(delta=-0.1)
+        elif keycode == "7":
+            self._set_debug_kp_level(delta=0.1)
+        elif keycode == "0":
+            self._set_debug_kp_level(value=1.0)
+        else:
+            self._warn_unsupported_keyboard_key(keycode)
+
+
+if __name__ == "__main__":
+    import argparse
+    import yaml
+    parser = argparse.ArgumentParser(description="Robot")
+    parser.add_argument(
+        "--robot_config", type=str, default="config/robot/g1.yaml", help="robot config file"
+    )
+    parser.add_argument(
+        "--policy_config", type=str, help="policy config file"
+    )
+    parser.add_argument(
+        "--model_path", type=str, help="model path"
+    )
+    parser.add_argument(
+        "--task", type=str, help="task type: tracking or reward or single or stiching", default="track-walk"
+    )
+    parser.add_argument(
+        "--pico-control", action="store_true",
+        help="Enable Pico controller buttons from the onboard teleop server for policy mode control.",
+    )
+    parser.add_argument(
+        "--pico-control-addr", type=str, default="tcp://127.0.0.1:28704",
+        help="ZMQ SUB address for Pico controller button JSON.",
+    )
+    parser.add_argument(
+        "--read-only", action="store_true",
+        help="Subscribe to G1 LowState and run inference without constructing or sending LowCmd.",
+    )
+    parser.add_argument(
+        "--record-dir", type=str, default=None,
+        help="Write timestamped asynchronous carry mocap/joint recordings under this directory.",
+    )
+
+    args = parser.parse_args()
+
+    with open(args.policy_config) as file:
+        policy_config = yaml.load(file, Loader=yaml.FullLoader)
+
+    with open(args.robot_config) as file:
+        robot_config = yaml.load(file, Loader=yaml.FullLoader)
+
+    with open(args.task, 'r') as file:
+        exp_config = yaml.load(file, Loader=yaml.FullLoader)
+    model_path = args.model_path
+
+    policy = UFODeployPolicy(
+        robot_config=robot_config,
+        policy_config=policy_config,
+        model_path=model_path,
+        exp_config=exp_config,
+        rl_rate=50,
+        pico_control=bool(args.pico_control),
+        pico_control_addr=str(args.pico_control_addr),
+        read_only=bool(args.read_only),
+        record_dir=args.record_dir,
+    )
+    policy.run()

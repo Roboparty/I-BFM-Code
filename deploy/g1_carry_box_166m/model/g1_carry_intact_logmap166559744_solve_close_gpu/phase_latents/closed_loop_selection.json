@@ -1,0 +1,73 @@
+{
+  "candidate_count": 30,
+  "fallback_order": {
+    "-1": [
+      "yaw_0p60_topk_0050",
+      "yaw_0p40_topk_0100",
+      "yaw_0p50_topk_0050",
+      "original_166560_transport_turn"
+    ],
+    "1": [
+      "yaw_0p50_topk_0050",
+      "yaw_0p60_topk_0050",
+      "yaw_0p40_topk_0050",
+      "original_166560_transport_turn"
+    ]
+  },
+  "method": "1.0 s hold settle + 1.0 s forced response; weakest signed base/box yaw with drift, upright, and contact penalties",
+  "primary": {
+    "-1": {
+      "base_displacement_m": 0.22386970607587112,
+      "base_planar_speed_mean_mps": 0.23535952143001254,
+      "base_yaw_integral_rad": -0.598624004283386,
+      "base_yaw_rate_mean_radps": -0.598624004283386,
+      "bilateral_contact_rate": 1.0,
+      "box_displacement_m": 0.21898910800444218,
+      "box_planar_speed_mean_mps": 0.2484520330021863,
+      "box_upright_min": 0.9416347506779594,
+      "box_yaw_integral_rad": -0.9436314098521735,
+      "box_yaw_rate_mean_radps": -0.9436314098521735,
+      "closed_loop_score": 0.4436234193552764,
+      "direction": -1,
+      "direction_name": "right",
+      "duration_s": 1.0,
+      "robot_upright_min": 0.9906739795550343,
+      "sample_count": 50,
+      "sign_valid": true,
+      "signed_base_yaw_integral_rad": 0.598624004283386,
+      "signed_box_yaw_integral_rad": 0.9436314098521735,
+      "source": "analysis/166.560M-reward_inference-solve-close/work/closed_loop_selection/raw/yaw_0p60_topk_0050_dir_-1",
+      "topk": 50,
+      "weakest_signed_yaw_rad": 0.598624004283386,
+      "yaw_name": "0p60",
+      "yaw_rate": 0.6
+    },
+    "1": {
+      "base_displacement_m": 0.2462008059493719,
+      "base_planar_speed_mean_mps": 0.27109339476460276,
+      "base_yaw_integral_rad": 0.7566608602619249,
+      "base_yaw_rate_mean_radps": 0.7566608602619249,
+      "bilateral_contact_rate": 1.0,
+      "box_displacement_m": 0.33141102411190576,
+      "box_planar_speed_mean_mps": 0.3899498729103,
+      "box_upright_min": 0.9789053664904073,
+      "box_yaw_integral_rad": 0.5915054309115592,
+      "box_yaw_rate_mean_radps": 0.591505430911559,
+      "closed_loop_score": 0.389341290390112,
+      "direction": 1,
+      "direction_name": "left",
+      "duration_s": 1.0,
+      "robot_upright_min": 0.9961934287032937,
+      "sample_count": 50,
+      "sign_valid": true,
+      "signed_base_yaw_integral_rad": 0.7566608602619249,
+      "signed_box_yaw_integral_rad": 0.5915054309115592,
+      "source": "analysis/166.560M-reward_inference-solve-close/work/closed_loop_selection/raw/yaw_0p50_topk_0050_dir_1",
+      "topk": 50,
+      "weakest_signed_yaw_rad": 0.5915054309115592,
+      "yaw_name": "0p50",
+      "yaw_rate": 0.5
+    }
+  },
+  "tests_per_direction": 15
+}

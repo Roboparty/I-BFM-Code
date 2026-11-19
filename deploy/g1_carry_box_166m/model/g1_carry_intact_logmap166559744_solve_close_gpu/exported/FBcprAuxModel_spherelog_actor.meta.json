@@ -1,0 +1,41 @@
+{
+  "checkpoint_step": 166559744,
+  "sphere_log_mode": "actor",
+  "actor_input_filter": [
+    "state",
+    "last_action",
+    "history_actor"
+  ],
+  "backward_input_filter": [
+    "state",
+    "privileged_state"
+  ],
+  "input_layout": [
+    {
+      "key": "state",
+      "dim": 98
+    },
+    {
+      "key": "last_action",
+      "dim": 29
+    },
+    {
+      "key": "history_actor",
+      "dim": 372
+    },
+    {
+      "key": "privileged_state",
+      "dim": 497
+    },
+    {
+      "key": "z",
+      "dim": 256
+    }
+  ],
+  "input_dim": 1252,
+  "output_dim": 29,
+  "opset_version": 17,
+  "source_model_sha256": "25b0d98c83f059289e97a3634cd04dd211dafb674c341e783fd86cb1ffd41cd9",
+  "onnx_sha256": "198a8738a35c77e8dd901081e80877fbc2d18dcb6f79dc4c43bb8aa4dd5e45a2",
+  "cpu_validation_max_abs_error": 7.450580596923828e-07
+}

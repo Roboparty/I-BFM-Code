@@ -1,0 +1,236 @@
+type: carry
+
+# Isolated 166.560M solve-close deployment. The observation, LuMo
+# transforms, contact estimator, calibration, PD gains and safety behavior are
+# identical to the frozen strong deployment. Only the copied latent set and
+# the solve-close transport controller are selected by the launch wrapper.
+# Its actor uses a backward-map sphere-log prompt and therefore requires the
+# training-time 497D privileged observation in addition to the normal actor obs.
+phase_controller_profile: intact_logmap150544384_strong
+deployment_variant: intact_logmap166559744_solve_close
+mocap_source: lumo
+mocap_timeout_ms: 200
+sphere_log_actor: true
+expected_input_dim: 1252
+
+lumo:
+  address: tcp://10.43.16.129:6868
+  protobuf_module: external/lumo/LusterFrameStruct_pb2.py
+  root_rigid_body: {name: G1_WAIST}
+  object_rigid_body: {name: CARRY_BOX}
+  # Optional enhancements. Missing/untracked hand rigid bodies fall back per
+  # hand to the existing encoder + FK capsule and never invalidate the frame.
+  # Only each rigid body's origin is consumed; its quaternion is ignored.
+  left_hand_rigid_body: {name: LEFT_HAND}
+  right_hand_rigid_body: {name: RIGHT_HAND}
+  position_scale: 0.001
+  velocity_scale: 0.001
+  angular_velocity_scale: 1.0
+  angular_velocity_frame: world
+  velocity_filter_alpha: 0.35
+  root_linear_velocity_source: position_delta
+  object_linear_velocity_source: position_delta
+  position_delta_min_dt_seconds: 0.001
+  position_delta_max_dt_seconds: 0.25
+  position_delta_max_speed_mps: 5.0
+  enforce_quality_grade: true
+  max_quality_grade: 3
+
+  target_position_world: [1.5, 0.0, 0.0]
+  target_quaternion_world: [1.0, 0.0, 0.0, 0.0]
+  target_pose_semantics: physical_ground
+  target_box_center_height: 0.175
+  require_calibrated: true
+  calibration:
+    confirmed: true
+    lumo_world_to_ufo_world:
+      translation: [0.0, 0.0, 0.0]
+      quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]
+    root_rigid_to_training_root:
+      position: [0.0, 0.0, 0.0]
+      quaternion_wxyz: [1.0, 0.0, 0.0, 0.0]
+    object_rigid_to_training_object:
+      position: [-0.00054322, -0.00285849, 0.00598539]
+      quaternion_wxyz: [0.07016202, -0.97153219, -0.22227911, -0.04236142]
+
+contact_source: box_hysteresis
+contact_estimator:
+  half_size: [0.175, 0.175, 0.175]
+  geom_position: [0.00102584, -0.00160677, 0.00637628]
+  geom_quaternion_wxyz: [0.07016202, 0.97153219, 0.22227911, 0.04236142]
+  capsule_radius: 0.035
+  enter_distance: 0.045
+  exit_distance: 0.060
+  use_hand_rigid_origins: true
+  hand_origin_enter_distance: 0.045
+  hand_origin_exit_distance: 0.060
+  # Reject a tracked but obviously mis-associated hand origin and use FK.
+  hand_origin_max_fk_distance: 0.20
+
+# Mandatory real-robot calibration gate.  No policy inference or LowCmd policy
+# action can be enabled with R1 until all three stages have passed.
+deployment_calibration:
+  enabled: true
+  # A completed calibration is copied here. It is never applied automatically;
+  # L1+R1 validates and reuses it directly, including deliberate fallen starts.
+  # A/default pose remains recommended for ordinary standing starts.
+  saved_result_path: logs/g1_carry_intact_logmap166559744_solve_close_gpu/latest_calibration.json
+
+  # Stage 1: robot stands in the default pose while LuMo tracks G1_WAIST.
+  # The measured offset is applied to all fall/get-up root-height thresholds.
+  expected_standing_pelvis_height: 0.80
+  min_pelvis_samples: 50
+  max_default_joint_error: 0.15
+  min_pelvis_upright: 0.90
+  max_pelvis_height_std: 0.015
+  max_pelvis_height_correction: 0.25
+
+  # Stage 2: CARRY_BOX is upright and stationary on the physical floor.
+  min_box_height_samples: 50
+  min_box_upright: 0.90
+  max_box_speed: 0.10
+  max_box_height_std: 0.010
+  max_box_height_correction: 0.15
+
+  # Stage 3: each X/Y press labels exactly one no-contact/contact control frame.
+  # Only valid LEFT_HAND/RIGHT_HAND rigid-body origins contribute.
+  min_contact_samples_per_label: 25
+  contact_quantile: 0.90
+  no_contact_quantile: 0.10
+  contact_min_separation: 0.010
+  contact_exit_margin: 0.015
+  contact_max_enter_distance: 0.15
+  max_samples_per_bucket: 5000
+
+kinematics_xml: data/robots/g1_carry_training/g1_29dof.xml
+latent_dir: model/g1_carry_intact_logmap166559744_solve_close_gpu/phase_latents
+get_up_latent: model/g1_carry_intact_logmap166559744_solve_close_gpu/get_up/z_get_up_reward.pkl
+
+# Close-range transport alignment ported from the selected MuJoCo
+# 166.560M-reward_inference-solve_close bundle. Values are pinned here instead
+# of being silently changed through environment variables on the real robot.
+solve_close:
+  near_align_distance: 0.80
+  near_align_enter_bearing_deg: 30.0
+  near_align_exit_bearing_deg: 15.0
+  near_align_enter_steps: 3
+  near_align_exit_steps: 5
+  near_align_blend_seconds: 0.20
+
+  pivot_arrival_speed: 0.15
+  pivot_response_seconds: 0.50
+  pivot_early_wrong_seconds: 0.25
+  pivot_min_base_yaw_rad: 0.04
+  pivot_min_box_yaw_rad: 0.02
+  pivot_wrong_yaw_rad: 0.02
+  pivot_max_base_drift: 0.22
+  pivot_max_box_drift: 0.28
+  pivot_max_seconds: 5.0
+  pivot_cooldown_seconds: 0.50
+
+  pivot_stall_window_seconds: 0.50
+  pivot_min_recent_yaw_rad: 0.03
+  pivot_min_bearing_improvement_deg: 3.0
+  pivot_max_height_drift: 0.08
+  pivot_min_box_upright: 0.85
+
+# Exact body order used by the checkpoint's max-local-self observation. The
+# runtime appends the same virtual head (0.35 m above torso_link) as training.
+privileged_torso_body_name: torso_link
+privileged_body_names:
+  - pelvis
+  - left_hip_pitch_link
+  - left_hip_roll_link
+  - left_hip_yaw_link
+  - left_knee_link
+  - left_ankle_pitch_link
+  - left_ankle_roll_link
+  - right_hip_pitch_link
+  - right_hip_roll_link
+  - right_hip_yaw_link
+  - right_knee_link
+  - right_ankle_pitch_link
+  - right_ankle_roll_link
+  - waist_yaw_link
+  - waist_roll_link
+  - torso_link
+  - left_shoulder_pitch_link
+  - left_shoulder_roll_link
+  - left_shoulder_yaw_link
+  - left_elbow_link
+  - left_wrist_roll_link
+  - left_wrist_pitch_link
+  - left_wrist_yaw_link
+  - right_shoulder_pitch_link
+  - right_shoulder_roll_link
+  - right_shoulder_yaw_link
+  - right_elbow_link
+  - right_wrist_roll_link
+  - right_wrist_pitch_link
+  - right_wrist_yaw_link
+
+hand_contact_offsets:
+  - [0.11, -0.01, 0.0]
+  - [0.11, 0.01, 0.0]
+hand_capsule_segments:
+  - [[0.07, 0.0, 0.0], [0.15, -0.02, 0.0]]
+  - [[0.07, 0.0, 0.0], [0.15, 0.02, 0.0]]
+
+phase:
+  fall_recovery_enabled: true
+  # Kept for config compatibility only; strong never routes a fallen robot to
+  # lift based on distance.
+  get_up_distance: 1.50
+  fall_upright_threshold: 0.20
+  fall_root_height: 0.30
+  fall_tilted_root_height: 0.50
+  fall_detect_steps: 10
+  get_up_upright_threshold: 0.85
+  get_up_root_height: 0.65
+  get_up_stable_steps: 25
+
+  approach_switch_distance: 0.75
+  heading_blend_full_deg: 60.0
+  max_turn_blend: 0.90
+
+  transport_heading_blend_full_deg: 45.0
+  transport_max_turn_blend: 0.45
+  transport_near_max_turn_blend: 0.80
+  transport_turn_boost_distance: 1.20
+
+  # Let the real robot enter placement within the same 0.40 m radius used by
+  # the relaxed placement-success gate. Use a 0.05 m exit hysteresis so small
+  # mocap/box motion near the boundary does not bounce back to transport.
+  place_align_distance: 0.40
+  place_enter_steps: 5
+  place_drift_distance: 0.45
+  place_drift_steps: 10
+  place_abort_distance: 0.80
+
+  hold_switch_lift: 0.50
+  hold_switch_upright: 0.85
+  hold_release_lift: 0.25
+  # Require 0.40 s at 50 Hz before lift hands off to transport. Keep the
+  # transport contact-loss response at 5 steps (0.10 s).
+  lift_ready_steps: 20
+  phase_hold_steps: 5
+
+  # LuMo reports the training reference. The grounded 0.35 m physical cube
+  # becomes 0.175 + 0.00598539 in this calibrated reference frame.
+  ground_center_height: 0.18098539
+  box_geom_position: [0.00102584, -0.00160677, 0.00637628]
+  box_geom_quaternion_wxyz: [0.07016202, 0.97153219, 0.22227911, 0.04236142]
+  lift_height: 0.35
+
+  place_settle_seconds: 0.20
+  place_lower_seconds: 2.0
+  place_release_seconds: 2.0
+  place_retry_delay_seconds: 1.0
+  place_max_attempt_seconds: 30.0
+  place_release_height: 0.08
+  place_success_distance: 0.40
+  place_success_height: 0.05
+  place_success_speed: 0.15
+  place_success_upright: 0.85
+  place_success_steps: 25
+  align_goal_lookahead: 0.0

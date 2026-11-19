@@ -33,6 +33,7 @@
 | `ibfm/tasks/push_box/` | 推箱交互脚本、控制器和 latent 向量 |
 | `ibfm/tasks/kick_box/` | 踢箱交互脚本、控制器和 latent 向量 |
 | `checkpoints/ibfm-166m/` | 选定的权重及其元数据 |
+| [`deploy/g1_carry_box_166m/`](deploy/g1_carry_box_166m/README.zh-CN.md) | G1 搬箱真机部署、166.560M ONNX、solve-close latent、标定与手柄控制 |
 
 ## 安装
 

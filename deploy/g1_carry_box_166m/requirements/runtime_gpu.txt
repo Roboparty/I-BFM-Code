@@ -1,0 +1,14 @@
+# GPU variant of requirements/runtime.txt for workstation deployment.
+# Do not install this alongside the CPU-only `onnxruntime` distribution.
+numpy
+mujoco
+onnxruntime-gpu==1.23.2
+pyyaml
+scipy
+pyzmq
+protobuf==3.20.3
+joblib
+loguru
+termcolor
+sshkeyboard
+huggingface-hub

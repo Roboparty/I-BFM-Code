@@ -1,0 +1,76 @@
+onnx_providers: [CUDAExecutionProvider]
+require_onnx_provider: CUDAExecutionProvider
+# Warm the CUDA provider and kernels in this same process before the 50 Hz loop.
+# The synthetic output is validated and discarded; it is never sent to G1.
+onnx_warmup_runs: 20
+onnx_warmup_tail_latent_dim: 256
+# Match the corresponding MuJoCo action path exactly. Joint limits, finite
+# checks, stop latch, and safe hold remain active in the deployment runtime.
+q_target_slew_safety_factor: 0.0
+
+observation: {}
+action_rescale: 5.0
+action_scale:
+  left_hip_pitch_joint: 0.35066146
+  left_hip_roll_joint: 0.35066146
+  left_hip_yaw_joint: 0.54754644
+  left_knee_joint: 0.35066146
+  left_ankle_pitch_joint: 0.43857726
+  left_ankle_roll_joint: 0.43857726
+  right_hip_pitch_joint: 0.35066146
+  right_hip_roll_joint: 0.35066146
+  right_hip_yaw_joint: 0.54754644
+  right_knee_joint: 0.35066146
+  right_ankle_pitch_joint: 0.43857726
+  right_ankle_roll_joint: 0.43857726
+  waist_yaw_joint: 0.07333333
+  waist_roll_joint: 0.04166659
+  waist_pitch_joint: 0.10000000
+  .*_shoulder_.*: 0.43857741
+  .*_elbow_joint: 0.43857741
+  .*_wrist_roll_joint: 0.43857741
+  .*_wrist_pitch_joint: 0.38903592
+  .*_wrist_yaw_joint: 0.38903592
+
+isaac_joint_names: &joints
+  [left_hip_pitch_joint, left_hip_roll_joint, left_hip_yaw_joint, left_knee_joint, left_ankle_pitch_joint, left_ankle_roll_joint,
+   right_hip_pitch_joint, right_hip_roll_joint, right_hip_yaw_joint, right_knee_joint, right_ankle_pitch_joint, right_ankle_roll_joint,
+   waist_yaw_joint, waist_roll_joint, waist_pitch_joint,
+   left_shoulder_pitch_joint, left_shoulder_roll_joint, left_shoulder_yaw_joint, left_elbow_joint, left_wrist_roll_joint, left_wrist_pitch_joint, left_wrist_yaw_joint,
+   right_shoulder_pitch_joint, right_shoulder_roll_joint, right_shoulder_yaw_joint, right_elbow_joint, right_wrist_roll_joint, right_wrist_pitch_joint, right_wrist_yaw_joint]
+
+joint_kp:
+  .*_hip_yaw_joint: 40.17924
+  .*_hip_roll_joint: 99.09843
+  .*_hip_pitch_joint: 99.09843
+  .*_knee_joint: 99.09843
+  .*ankle_pitch_joint: 28.50125
+  .*ankle_roll_joint: 28.50125
+  waist_yaw_joint: 40.17924
+  waist_roll_joint: 28.50125
+  waist_pitch_joint: 40.0
+  .*_shoulder_.*: 14.25062
+  .*_elbow_joint: 14.25062
+  .*_wrist_roll_joint: 14.25062
+  .*_wrist_pitch_joint: 8.61103
+  .*_wrist_yaw_joint: 8.61103
+joint_kd:
+  .*_hip_yaw_joint: 2.55789
+  .*_hip_roll_joint: 6.30880
+  .*_hip_pitch_joint: 6.30880
+  .*_knee_joint: 6.30880
+  .*ankle_pitch_joint: 1.81445
+  .*ankle_roll_joint: 1.81445
+  waist_yaw_joint: 5.0
+  waist_roll_joint: 5.0
+  waist_pitch_joint: 5.0
+  .*_shoulder_.*: 0.90722
+  .*_elbow_joint: 0.90722
+  .*_wrist_roll_joint: 0.90722
+  .*_wrist_pitch_joint: 0.54820
+  .*_wrist_yaw_joint: 0.54820
+default_joint_pos:
+  .*_hip_pitch_joint: -0.1
+  .*_knee_joint: 0.3
+  .*_ankle_pitch_joint: -0.2
+policy_joint_names: *joints

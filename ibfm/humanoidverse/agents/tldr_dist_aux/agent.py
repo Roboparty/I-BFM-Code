@@ -309,7 +309,7 @@ class TldrDistAuxAgent(GcrRlDistAuxAgent):
 
         aux_reward = torch.zeros((self.cfg.train.batch_size, 1), device=self.device, dtype=torch.float32)
         for aux_reward_name in self.cfg.aux_rewards:
-            metrics[f"aux_rew/{aux_reward_name}"] = train_batch["aux_rewards"][aux_reward_name].mean()
+            metrics[f"aux_rew/{aux_reward_name}"] = train_batch["aux_rewards"][aux_reward_name].mean().to(self.device)
             aux_reward += self.cfg.aux_rewards_scaling[aux_reward_name] * train_batch["aux_rewards"][aux_reward_name].to(self.device)
         aux_reward = self._model._aux_reward_normalizer(aux_reward)
 

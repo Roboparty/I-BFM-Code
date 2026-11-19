@@ -42,6 +42,8 @@ def _actor_agent(*, residual_coef: float, diagnostic_samples: int = 0) -> FBcprA
     agent = object.__new__(FBcprAuxAgent)
     actor = _Actor()
     agent.cfg = SimpleNamespace(
+        compile=False,
+        cudagraphs=False,
         model=SimpleNamespace(amp=False),
         train=SimpleNamespace(
             intact_native_local_coef=4.0 / 7.0,

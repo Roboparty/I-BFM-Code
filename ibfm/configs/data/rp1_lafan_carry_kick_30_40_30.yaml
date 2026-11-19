@@ -1,0 +1,20 @@
+robot_config: configs/robots/rp1_28dof_official_pd.yaml
+
+# Prepared RP1 motion caches, with physical-contact hysteresis 4.5/6.0 cm.
+# Weights are sampling probabilities per source, independent of motion counts.
+datasets:
+  - name: rp1_lafan
+    format: ufo_pkl
+    train_path: ../../cache/motion_data/rp1_lafan_carry_kick_contact_hyst45_60_30_40_30/rp1_lafan_h200_v2_train_near10s_ufo.pkl
+    inference_path: ../../cache/motion_data/rp1_lafan_carry_kick_contact_hyst45_60_30_40_30/rp1_lafan_h200_v2_full_ufo.pkl
+    weight: 0.3
+  - name: rp1_carry
+    format: ufo_pkl
+    train_path: ../../cache/motion_data/rp1_lafan_carry_kick_contact_hyst45_60_30_40_30/rp1_carry_box_contact_hyst45_60_20260923_train_near10s_ufo.pkl
+    inference_path: ../../cache/motion_data/rp1_lafan_carry_kick_contact_hyst45_60_30_40_30/rp1_carry_box_contact_hyst45_60_20260923_full_ufo.pkl
+    weight: 0.4
+  - name: rp1_kick
+    format: ufo_pkl
+    train_path: ../../cache/motion_data/rp1_lafan_carry_kick_contact_hyst45_60_30_40_30/rp1_kick_box_contact_hyst45_60_20260923_train_near10s_ufo.pkl
+    inference_path: ../../cache/motion_data/rp1_lafan_carry_kick_contact_hyst45_60_30_40_30/rp1_kick_box_contact_hyst45_60_20260923_full_ufo.pkl
+    weight: 0.3

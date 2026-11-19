@@ -10,7 +10,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-本仓库提供 H200 训练源码、选定的 **166.560M 步权重**，以及 **Carry Box（搬箱）**、**Push Box（推箱）** 和 **Kick Box（踢箱）** 的交互配置。三个任务使用同一份权重。仓库保留了训练实现和输入文件，以支持复现。
+本仓库提供 G1 的 H200 训练源码、选定的 **166.560M 步权重**，以及 **Carry Box（搬箱）**、**Push Box（推箱）** 和 **Kick Box（踢箱）** 的交互配置。G1 的三个任务使用同一份权重，同时提供 RP1 训练配置和仿真视频。
 
 ## 项目视频
 
@@ -19,6 +19,14 @@
 | Carry Box（搬箱） | Push Box（推箱） | Kick Box（踢箱） |
 | :---: | :---: | :---: |
 | [![搬箱视频预览](assets/carry-box-preview.gif)](https://iamhardworking.github.io/I-BFM/#robust-carry-box) | [![推箱视频预览](assets/push-box-preview.gif)](https://iamhardworking.github.io/I-BFM/#robust-push-box) | [![踢箱视频预览](assets/kick-box-preview.gif)](https://iamhardworking.github.io/I-BFM/#robust-kick-box) |
+
+### RP1 搬箱
+
+[![RP1 搬箱仿真预览](assets/rp1/carry-box-preview.gif)](assets/rp1/carry-box.mp4)
+
+[观看 RP1 搬箱完整仿真视频（44 秒）](assets/rp1/carry-box.mp4)，使用官方 KP/KD
+重训的第 249,839,616 步模型及修正后的放箱起身控制。模型与场景参数见
+[RP1 说明](ibfm/docs/RP1_TRAINING.md)。
 
 ## 方法概览
 
@@ -34,6 +42,7 @@
 | `ibfm/tasks/kick_box/` | 踢箱交互脚本、控制器和 latent 向量 |
 | `checkpoints/ibfm-166m/` | 选定的权重及其元数据 |
 | [`deploy/g1_carry_box_166m/`](deploy/g1_carry_box_166m/README.zh-CN.md) | G1 搬箱真机部署、166.560M ONNX、solve-close latent、标定与手柄控制 |
+| [`ibfm/docs/RP1_TRAINING.md`](ibfm/docs/RP1_TRAINING.md) | RP1 官方 PD 配置、动作缓存清单、训练命令和 CPU replay |
 
 ## 安装
 
@@ -66,6 +75,27 @@ RESUME=1 ./scripts/train_ibfm_h200.sh ibfm_reproduction
 ```
 
 因缺少同期 replay buffer，续训轨迹会与不中断的训练不同。
+
+### 48 GB 显卡的 CPU Replay
+
+训练 CLI 支持 `--buffer-device cpu`，将在线 replay 和 expert buffer 放入主存，
+模型及训练批次仍在 GPU 上。这能降低 4090 48 GB 等显卡的显存需求，但会增加
+主存占用和数据传输开销。RP1 启动脚本可通过 `BUFFER_DEVICE=cpu` 启用，见下方
+命令；CLI 默认仍为 `auto`。详细说明见 [CPU replay](ibfm/docs/RP1_TRAINING.md#cpu-replay-for-48-gb-gpus)。
+
+## RP1 训练
+
+RP1 使用官方 KP/KD、完整域随机化，以及 LAFAN/Carry/Kick 为 30/40/30 的数据配比。
+准备好六份 RP1 缓存后，在 `ibfm/` 目录执行：
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/check_rp1_training.py
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 BUFFER_DEVICE=cpu \
+  bash scripts/train_rp1.sh rp1_official_pd_250m
+```
+
+默认 8 卡、每卡 512 个环境、总计 250M 步。数据安装、完整参数、checkpoint/replay
+保存、磁盘需求及续训命令，见 [RP1 训练说明](ibfm/docs/RP1_TRAINING.md)。
 
 ## 交互任务
 

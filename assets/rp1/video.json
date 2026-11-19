@@ -1,0 +1,20 @@
+{
+  "video": "carry-box.mp4",
+  "sha256": "df2ae9af390b287e4f9c112a1f5027769e5fde9a259dc5b1af9f1af473d10bb7",
+  "scene": "near_forward",
+  "duration_s": 44,
+  "fps": 30,
+  "frames": 1320,
+  "checkpoint_step": 249839616,
+  "initial_robot_box_distance_m": 0.9,
+  "goal_offset_from_initial_box_xy_m": [1.0, 0.0],
+  "box_size_m": [0.35, 0.35, 0.35],
+  "box_mass_kg": 0.7,
+  "placement_success_radius_m": 0.4,
+  "controller_refinement": "Disable post-release lower-body crouch/stand mixing; preserve latent and target filters.",
+  "stable_released": true,
+  "final_goal_error_m": 0.28301093972088504,
+  "falls": 0,
+  "recoveries": 0,
+  "validation": "MuJoCo simulation only"
+}

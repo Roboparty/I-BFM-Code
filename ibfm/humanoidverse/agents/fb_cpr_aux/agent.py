@@ -209,7 +209,7 @@ class FBcprAuxAgent(FBcprAgent):
         )
         for aux_reward_name in self.cfg.aux_rewards:
             # let's log even this information
-            metrics[f"aux_rew/{aux_reward_name}"] = train_batch["aux_rewards"][aux_reward_name].mean()
+            metrics[f"aux_rew/{aux_reward_name}"] = train_batch["aux_rewards"][aux_reward_name].mean().to(self.device)
             aux_reward += self.cfg.aux_rewards_scaling[aux_reward_name] * train_batch["aux_rewards"][aux_reward_name].to(self.device)
 
         aux_reward = self._model._aux_reward_normalizer(aux_reward)
@@ -353,6 +353,7 @@ class FBcprAuxAgent(FBcprAgent):
         intact_batch: dict | None = None,
     ) -> Dict[str, torch.Tensor]:
         del action  # Scheme 4 uses native BFM objectives, never an action label.
+        self.actor_optimizer.zero_grad(set_to_none=True)
         with autocast(device_type=self.device, dtype=self._model.amp_dtype, enabled=self.cfg.model.amp):
             intact_goal_objective = None
             intact_local_objective = None
@@ -368,10 +369,20 @@ class FBcprAuxAgent(FBcprAgent):
                 and getattr(self, "_intact_grad_diagnostic_count", 0)
                 < self.cfg.train.intact_grad_diagnostic_samples
             )
+            sequential_backward = (
+                native_enabled and intact_batch is not None and not diagnostic_enabled
+                and not self.cfg.compile and not self.cfg.cudagraphs
+            )
             # Scheme 4 preserves the complete baseline mixed-q actor objective.
             base_objective = self._native_actor_objective(obs, z)
             base_actor_loss = base_objective["loss"]
             actor_loss = base_actor_loss
+            if sequential_backward:
+                # Accumulate the same weighted gradient without retaining three graphs.
+                base_actor_loss.backward()
+                base_objective = tree_map(lambda value: value.detach(), base_objective)
+                base_actor_loss = base_objective["loss"]
+                actor_loss = base_actor_loss
 
             if intact_batch is not None:
                 future_keys = sorted(
@@ -393,7 +404,13 @@ class FBcprAuxAgent(FBcprAgent):
                 # Every sampled clip takes both branches. These are two calls to
                 # the native BFM objective, not inverse-action MSE losses.
                 intact_local_objective = self._native_actor_objective(intact_obs, q_local)
+                if sequential_backward:
+                    (residual_coef * local_coef / (local_coef + goal_coef) * intact_local_objective["loss"]).backward()
+                    intact_local_objective = tree_map(lambda value: value.detach(), intact_local_objective)
                 intact_goal_objective = self._native_actor_objective(intact_obs, q_goal)
+                if sequential_backward:
+                    (residual_coef * goal_coef / (local_coef + goal_coef) * intact_goal_objective["loss"]).backward()
+                    intact_goal_objective = tree_map(lambda value: value.detach(), intact_goal_objective)
                 audit_local_coef = local_coef if native_enabled else 4.0 / 7.0
                 audit_goal_coef = goal_coef if native_enabled else 3.0 / 7.0
                 native_pair_loss = _combine_native_actor_losses(
@@ -487,8 +504,8 @@ class FBcprAuxAgent(FBcprAgent):
                 print(f"[INTACT-GRAD] sample={self._intact_grad_diagnostic_count} {rendered}", flush=True)
 
         # optimize actor
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        actor_loss.backward()
+        if not sequential_backward:
+            actor_loss.backward()
         average_gradients(self._model._actor.parameters())
         if clip_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm)

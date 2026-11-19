@@ -367,12 +367,14 @@ class FBAgent:
                 source_length=source_length,
                 windows={"goal_observation": (horizon - 1, traj_length)},
             )
-            z = self._model.backward_map(batch["goal_observation"])
+            goal_obs = tree_map(lambda x: x.to(self._model.device), batch["goal_observation"])
+            z = self._model.backward_map(goal_obs)
             z = z.view(batch_dim, traj_length, z.shape[-1])
             return self._model.project_z(z)
 
         batch = replay_buffer["expert_slicer"].sample(batch_dim * traj_length, seq_length=traj_length)  # N*T x obs_dim
-        z = self._model.backward_map(batch["next"]["observation"])  # NT x z_dim
+        next_obs = tree_map(lambda x: x.to(self._model.device), batch["next"]["observation"])
+        z = self._model.backward_map(next_obs)  # NT x z_dim
         z = z.view(batch_dim, traj_length, z.shape[-1])  # N x T x z_dim
         for step in range(traj_length):
             end_idx = min(step + self.cfg.model.seq_length, traj_length)

@@ -120,6 +120,7 @@ def build_ufo_mjlab_config(
     carry_aux_terms: bool = False,
     task_bn_normalizer: bool = False,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
+    buffer_device: str = "auto",
     disable_dr: bool = False,
     disable_obs_noise: bool = False,
     lr_scale: float = 1.0,
@@ -132,6 +133,10 @@ def build_ufo_mjlab_config(
     init_model_checkpoint: str | Path | None = None,
     disable_compile: bool = False,
 ) -> TrainConfig:
+    if buffer_device not in ("auto", "cpu", "cuda"):
+        raise ValueError("buffer_device must be auto, cpu, or cuda")
+    if buffer_device == "auto":
+        buffer_device = "cuda" if device.startswith("cuda") else "cpu"
     agent = canonical_agent_name(agent)
     robot_training = load_robot_training_spec(robot_config or DEFAULT_ROBOT_CONFIG)
     try:
@@ -280,7 +285,7 @@ def build_ufo_mjlab_config(
         wandb_pname=wandb_project,
         wandb_run_name=wandb_run_name or f"ufo_{agent}",
         load_expert_data_from_motion_lib=True,
-        buffer_device="cuda" if device.startswith("cuda") else "cpu",
+        buffer_device=buffer_device,
         disable_tqdm=True,
         evaluations=evaluations,
         eval_every_steps=train_runtime["eval_every_steps"],
@@ -421,6 +426,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         carry_aux_terms=bool(args.carry_aux_terms),
         task_bn_normalizer=bool(args.task_bn_normalizer),
         buffer_size=args.buffer_size,
+        buffer_device=args.buffer_device,
         disable_dr=bool(args.disable_dr),
         disable_obs_noise=bool(args.disable_obs_noise),
         lr_scale=args.lr_scale,
@@ -439,7 +445,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"robot_config={cfg.env.robot_config_path}, mjcf_path={cfg.env.mjcf_path}, "
         f"data_path={cfg.env.lafan_tail_path}, data_mix_weights={cfg.env.data_mix_weights}, "
         f"num_envs_per_rank={args.num_envs}, global_parallel_envs={args.num_envs * world_size}, "
-        f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, "
+        f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, buffer_device={cfg.buffer_device}, "
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
         f"expert_z={args.expert_z_mode}{args.expert_z_horizon}, "
         f"intact_native_goal=direct{args.intact_goal_horizon}:{args.intact_native_goal_coef}, "
@@ -660,6 +666,12 @@ def parse_args() -> argparse.Namespace:
         help="Weight closed-loop carry object/contact and body/root terms into the auxiliary reward objective.",
     )
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="Replay capacity per rank/GPU.")
+    parser.add_argument(
+        "--buffer-device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="Store online replay and expert buffers on this device; auto follows the training device. Sampled batches still train on the model device.",
+    )
     parser.add_argument(
         "--num-agent-updates",
         type=int,

@@ -10,7 +10,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-This repository provides the H200 training source, the selected **166.560M-step checkpoint**, and interactive configurations for **Carry Box**, **Push Box**, and **Kick Box**. The task scripts use the same checkpoint. The training implementation and input files are retained for reproducibility.
+This repository provides the G1 H200 training source, the selected **166.560M-step checkpoint**, and interactive configurations for **Carry Box**, **Push Box**, and **Kick Box**. The G1 task scripts use the same checkpoint. RP1 training configurations and a simulation video are also included.
 
 ## Project videos
 
@@ -19,6 +19,14 @@ Click a preview to watch the full video on the project website.
 | Carry Box | Push Box | Kick Box |
 | :---: | :---: | :---: |
 | [![Carry Box video preview](assets/carry-box-preview.gif)](https://iamhardworking.github.io/I-BFM/#robust-carry-box) | [![Push Box video preview](assets/push-box-preview.gif)](https://iamhardworking.github.io/I-BFM/#robust-push-box) | [![Kick Box video preview](assets/kick-box-preview.gif)](https://iamhardworking.github.io/I-BFM/#robust-kick-box) |
+
+### RP1 Carry Box
+
+[![RP1 Carry Box simulation](assets/rp1/carry-box-preview.gif)](assets/rp1/carry-box.mp4)
+
+[Watch the full RP1 simulation video (44 seconds)](assets/rp1/carry-box.mp4),
+using the 249,839,616-step official-PD model and refined post-release standing.
+See [RP1 details](ibfm/docs/RP1_TRAINING.md) for model and scene settings.
 
 ## Method overview
 
@@ -34,6 +42,7 @@ Click a preview to watch the full video on the project website.
 | `ibfm/tasks/kick_box/` | Kick Box interactive scripts, controller, and latents |
 | `checkpoints/ibfm-166m/` | Selected checkpoint and metadata |
 | [`deploy/g1_carry_box_166m/`](deploy/g1_carry_box_166m/) | G1 Carry Box real-robot deployment, 166.560M ONNX actor, solve-close latents, calibration, and gamepad control |
+| [`ibfm/docs/RP1_TRAINING.md`](ibfm/docs/RP1_TRAINING.md) | RP1 official-PD configuration, motion-cache manifest, training commands, and CPU replay |
 
 ## Setup
 
@@ -66,6 +75,29 @@ RESUME=1 ./scripts/train_ibfm_h200.sh ibfm_reproduction
 ```
 
 Without a replay buffer from the same step, the continued run will differ from an uninterrupted run.
+
+### CPU Replay For 48 GB GPUs
+
+The training CLI supports `--buffer-device cpu` to store online replay and expert
+buffers in host RAM while keeping the model and training batches on GPU. This
+reduces VRAM use for GPUs such as the 4090 48 GB, with additional host memory and
+transfer costs. The RP1 launcher accepts `BUFFER_DEVICE=cpu`, as shown below;
+the CLI default remains `auto`. See [memory details](ibfm/docs/RP1_TRAINING.md#cpu-replay-for-48-gb-gpus).
+
+## RP1 Training
+
+RP1 uses official PD gains, full domain randomization and LAFAN/Carry/Kick
+sampling weights 30/40/30. After preparing the six RP1 caches, run from `ibfm/`:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/check_rp1_training.py
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 BUFFER_DEVICE=cpu \
+  bash scripts/train_rp1.sh rp1_official_pd_250m
+```
+
+Defaults are eight GPUs, 512 environments per GPU and 250M total steps. See
+[RP1 training details](ibfm/docs/RP1_TRAINING.md) for data installation, parameters,
+checkpoint/replay saving, disk requirements and resume commands.
 
 ## Interactive tasks
 

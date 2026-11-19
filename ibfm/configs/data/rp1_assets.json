@@ -1,0 +1,19 @@
+{
+  "pd_source": "https://github.com/Roboparty/robolab/blob/45cdc13a3465449315552af3dae09fa23f7083f5/robolab/assets/robots/roboparty.py",
+  "pd_mapping": "Official 24-DoF gains mapped to RP1 28-DoF; each of the three wrist axes uses the official wrist gain.",
+  "reference_checkpoint_step": 249839616,
+  "reference_model_sha256": "f6e559b58a8daf8b0a98f8d9e55f8c98ea9710a3e5fc992d54906931548df649",
+  "cache_directory": "cache/motion_data/rp1_lafan_carry_kick_contact_hyst45_60_30_40_30",
+  "config_sha256": {
+    "configs/robots/rp1_28dof_official_pd.yaml": "c373efa48b714683b35e38654099fa09d820ffed6138cc6287af35c9259d0188",
+    "configs/tasks/carry_box_rp1_full_dr.yaml": "0b29ba09b7a10cd3074283dce415f0287f25e4bd0cd6b9eedd74c10ae3dad6ef"
+  },
+  "sha256": {
+    "rp1_carry_box_contact_hyst45_60_20260923_full_ufo.pkl": "b5c9f4839b62dfc2eb8fd619ab05c61168fd136444c5253b939d0cd4687c9119",
+    "rp1_carry_box_contact_hyst45_60_20260923_train_near10s_ufo.pkl": "ff7199a1346fd440a4c37c816883c4148332af52847adc5bceafbfe26188e0e0",
+    "rp1_kick_box_contact_hyst45_60_20260923_full_ufo.pkl": "cd022e2e4c0345050987410966e07676e74bea0d3e74a6b907f603844dec86ff",
+    "rp1_kick_box_contact_hyst45_60_20260923_train_near10s_ufo.pkl": "f897ecf63bd78198beb494f9a48695b8fc5597ac9724f552b56e52da2f27fd72",
+    "rp1_lafan_h200_v2_full_ufo.pkl": "d61a41cf7fabad4f42d84170a2414778e38e056c2cf7824ac4be8bd7f8cf75d8",
+    "rp1_lafan_h200_v2_train_near10s_ufo.pkl": "dbd02889228e38fe6fbc59c5071da2d85ec4ad6da16dd0dadb8461c3137b069e"
+  }
+}
